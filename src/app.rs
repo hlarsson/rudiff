@@ -517,6 +517,17 @@ impl App {
     /// (cancel) is honored; once a result is shown, `j`/`k` scroll and any of
     /// `esc`/`q`/`enter`/`e` dismiss it.
     fn on_explain_key(&mut self, key: KeyEvent) {
+        // Guidance input: type to refine the prompt, enter to ask, esc to back out.
+        if self.explain.is_prompting() {
+            match key.code {
+                KeyCode::Esc => self.explain.cancel(),
+                KeyCode::Enter => self.explain.submit(),
+                KeyCode::Backspace => self.explain.input_backspace(),
+                KeyCode::Char(c) => self.explain.input_push(c),
+                _ => {}
+            }
+            return;
+        }
         if self.explain.is_running() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 self.explain.cancel();
@@ -572,7 +583,8 @@ impl App {
             self.flash = Some("nothing to explain here".to_string());
             return;
         }
-        self.explain = crate::explain::Explain::start(&instruction, &diff_text, target);
+        // Open the guidance popup; the query fires on submit.
+        self.explain = crate::explain::Explain::prompt(instruction, diff_text, target);
     }
 
     /// Concatenated unified diff of the whole changeset, capped to keep the

@@ -34,8 +34,10 @@ request is rendered; `A..B` is a literal two-dot diff.
   `.rudiff.toml`.
 - **Explain with Claude** — press `e` to ask the Claude Code CLI (`claude -p`)
   to summarize the current file's diff (or the whole branch from the overview).
-  The query runs in the background — `esc` cancels it mid-flight — and the
-  response shows in a scrollable overlay. Requires `claude` on your PATH.
+  A popup lets you add optional guidance first (e.g. "focus on security" or "is
+  this thread-safe?"). The query runs in the background — `esc` cancels it
+  mid-flight — and the response shows in a scrollable overlay. Requires `claude`
+  on your PATH.
 
 ## Keybindings
 

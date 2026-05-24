@@ -22,6 +22,8 @@ pub const MAX_DIFF_BYTES: usize = 60 * 1024;
 /// State of the explain overlay.
 pub enum Explain {
     Idle,
+    /// Collecting optional extra guidance from the reviewer before asking.
+    Prompting(Prompting),
     Running(Running),
     /// Finished: the text to display (an answer, or an error message).
     Result {
@@ -30,6 +32,18 @@ pub enum Explain {
         /// Scroll offset (in wrapped lines) within the result overlay.
         scroll: usize,
     },
+}
+
+/// Captured request plus the guidance line the user is typing.
+pub struct Prompting {
+    /// Free-text guidance being entered (may be empty).
+    pub input: String,
+    /// What we're explaining, for the popup label.
+    pub target: String,
+    /// Base instruction; the guidance is appended on submit.
+    instruction: String,
+    /// The diff to explain, rendered once when `e` was pressed.
+    diff_text: String,
 }
 
 pub struct Running {
@@ -87,15 +101,56 @@ impl Explain {
         }
     }
 
+    /// Open the guidance popup for a captured request (does not spawn yet).
+    pub fn prompt(instruction: String, diff_text: String, target: String) -> Explain {
+        Explain::Prompting(Prompting {
+            input: String::new(),
+            target,
+            instruction,
+            diff_text,
+        })
+    }
+
+    /// Submit the guidance popup: fold any guidance into the instruction and
+    /// fire the query. No-op unless we're in the `Prompting` state.
+    pub fn submit(&mut self) {
+        if let Explain::Prompting(p) = std::mem::replace(self, Explain::Idle) {
+            let mut instruction = p.instruction;
+            let guidance = p.input.trim();
+            if !guidance.is_empty() {
+                instruction
+                    .push_str("\n\nThe reviewer specifically asks you to focus on / answer this: ");
+                instruction.push_str(guidance);
+            }
+            *self = Explain::start(&instruction, &p.diff_text, p.target);
+        }
+    }
+
+    pub fn input_push(&mut self, c: char) {
+        if let Explain::Prompting(p) = self {
+            p.input.push(c);
+        }
+    }
+
+    pub fn input_backspace(&mut self) {
+        if let Explain::Prompting(p) = self {
+            p.input.pop();
+        }
+    }
+
     pub fn is_idle(&self) -> bool {
         matches!(self, Explain::Idle)
+    }
+
+    pub fn is_prompting(&self) -> bool {
+        matches!(self, Explain::Prompting(_))
     }
 
     pub fn is_running(&self) -> bool {
         matches!(self, Explain::Running(_))
     }
 
-    /// True when an overlay (spinner or result) should be shown.
+    /// True when an overlay (prompt, spinner, or result) should be shown.
     pub fn is_active(&self) -> bool {
         !self.is_idle()
     }

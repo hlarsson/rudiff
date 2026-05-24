@@ -19,6 +19,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let theme = app.theme; // `Theme` is Copy, so this doesn't borrow `app`.
     match &mut app.explain {
         Explain::Idle => {}
+        Explain::Prompting(p) => prompting(&theme, f, area, &p.target, &p.input),
         Explain::Running(r) => {
             spinner(&theme, f, area, &r.target, r.started.elapsed().as_millis());
         }
@@ -38,6 +39,49 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             result(&theme, f, popup, text, *is_error, *scroll);
         }
     }
+}
+
+fn prompting(theme: &Theme, f: &mut Frame, area: Rect, target: &str, input: &str) {
+    let width = 72u16.min(area.width.saturating_sub(2));
+    let popup = center(area, width, 7);
+    let inner_w = popup.width.saturating_sub(2) as usize;
+
+    // Show the tail of the input if it's longer than the field, with a cursor.
+    let field_w = inner_w.saturating_sub(4); // "> " + cursor headroom
+    let shown = crate::util::truncate_left(input, field_w);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Explain ", Style::default().fg(theme.secondary)),
+            Span::styled(
+                target.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "Add guidance (optional), e.g. \"focus on edge cases\":",
+            theme.dim(),
+        )),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            Span::raw(shown),
+            Span::styled("▏", Style::default().fg(theme.accent)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("enter to ask · esc to cancel", theme.dim())),
+    ];
+
+    let block = Block::default()
+        .title(" Explain with Claude ")
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(theme.chrome_style());
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn spinner(theme: &Theme, f: &mut Frame, area: Rect, target: &str, elapsed_ms: u128) {
