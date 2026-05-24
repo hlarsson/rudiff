@@ -96,21 +96,29 @@ fn snapshot(
     // Seed the width as if the overview had already rendered, so key-driven
     // mode decisions match real usage.
     app.width = w;
-    if let Some(keys) = &cli.keys {
-        app.feed_keys(keys);
-    }
-
-    // If a key script kicked off an async `claude` query, pump it so the
-    // snapshot captures real output. By default we run to completion; set
-    // RUDIFF_SNAPSHOT_PUMP_MS to capture a mid-stream frame instead.
+    // Keys are split on `|`: the part before is fed first, then any in-flight
+    // `claude` query is pumped, then the part after is fed (so a script can act
+    // on the finished result). Set RUDIFF_SNAPSHOT_PUMP_MS to cap the pump and
+    // capture a mid-stream frame instead.
     let cap_ms: u128 = std::env::var("RUDIFF_SNAPSHOT_PUMP_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90_000);
-    let started = std::time::Instant::now();
-    while app.explain.is_running() && started.elapsed().as_millis() < cap_ms {
+    if let Some(keys) = &cli.keys {
+        let (pre, post) = keys
+            .split_once('|')
+            .map(|(a, b)| (a, Some(b)))
+            .unwrap_or((keys.as_str(), None));
+        app.feed_keys(pre);
+        let started = std::time::Instant::now();
+        while app.explain.is_running() && started.elapsed().as_millis() < cap_ms {
+            app.explain.poll();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         app.explain.poll();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Some(post) = post {
+            app.feed_keys(post);
+        }
     }
 
     let backend = TestBackend::new(w, h);

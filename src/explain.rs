@@ -62,6 +62,12 @@ pub enum Explain {
         is_error: bool,
         /// Scroll offset (in wrapped lines) within the result overlay.
         scroll: usize,
+        /// What was explained — used for the suggested save filename + header.
+        target: String,
+        /// `Some(filename)` while the user is editing the save path.
+        save: Option<String>,
+        /// Transient confirmation/error shown in the footer (e.g. "Saved to …").
+        notice: Option<String>,
     },
 }
 
@@ -157,6 +163,9 @@ impl Explain {
                 ),
                 is_error: true,
                 scroll: 0,
+                target,
+                save: None,
+                notice: None,
             },
         }
     }
@@ -243,6 +252,7 @@ impl Explain {
             return;
         }
         let success = r.child.wait().ok().map(|s| s.success()).unwrap_or(false);
+        let target = std::mem::take(&mut r.target);
 
         // Prefer the authoritative `result` text; fall back to the streamed
         // partial. Surface stderr (or a generic note) when things went wrong.
@@ -271,6 +281,9 @@ impl Explain {
             text,
             is_error,
             scroll: 0,
+            target,
+            save: None,
+            notice: None,
         };
     }
 
@@ -288,10 +301,157 @@ impl Explain {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
-        if let Explain::Result { scroll, .. } = self {
+        if let Explain::Result {
+            scroll,
+            save,
+            notice,
+            ..
+        } = self
+        {
+            if save.is_some() {
+                return; // editing the filename — don't scroll
+            }
+            *notice = None; // any navigation clears a stale "saved" notice
             *scroll = (*scroll as isize + delta).max(0) as usize;
         }
     }
+
+    // ---- Saving the response to a Markdown file ----
+
+    pub fn is_saving(&self) -> bool {
+        matches!(self, Explain::Result { save: Some(_), .. })
+    }
+
+    /// Begin saving: open the filename field pre-filled with a suggestion.
+    pub fn start_save(&mut self) {
+        if let Explain::Result {
+            target,
+            save,
+            notice,
+            ..
+        } = self
+            && save.is_none()
+        {
+            *save = Some(suggested_filename(target));
+            *notice = None;
+        }
+    }
+
+    pub fn save_input_push(&mut self, c: char) {
+        if let Explain::Result {
+            save: Some(name), ..
+        } = self
+        {
+            name.push(c);
+        }
+    }
+
+    pub fn save_input_backspace(&mut self) {
+        if let Explain::Result {
+            save: Some(name), ..
+        } = self
+        {
+            name.pop();
+        }
+    }
+
+    /// Cancel the filename editor, returning to the response view.
+    pub fn cancel_save(&mut self) {
+        if let Explain::Result { save, .. } = self {
+            *save = None;
+        }
+    }
+
+    /// Write the response to the entered filename (resolved against `cwd`).
+    /// Reports success/failure via the `notice` field; on success the editor
+    /// closes, on failure it stays open so the user can fix the path.
+    pub fn confirm_save(&mut self, cwd: &std::path::Path) {
+        let Explain::Result {
+            text,
+            target,
+            save,
+            notice,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let Some(name) = save.as_ref().map(|s| s.trim().to_string()) else {
+            return;
+        };
+        if name.is_empty() {
+            *notice = Some("Enter a filename".to_string());
+            return;
+        }
+        // An absolute path replaces `cwd`; a relative one is joined onto it.
+        let path = cwd.join(&name);
+        let contents = format!("# rudiff explanation — {target}\n\n{text}\n");
+        match std::fs::write(&path, contents) {
+            Ok(()) => {
+                *save = None;
+                *notice = Some(format!("Saved to {}", path.display()));
+            }
+            Err(e) => *notice = Some(format!("Save failed: {e}")),
+        }
+    }
+}
+
+/// A descriptive, conflict-resistant default filename: the target slug plus a
+/// UTC timestamp to the second.
+fn suggested_filename(target: &str) -> String {
+    format!("rudiff-explain-{}-{}.md", slug(target), timestamp())
+}
+
+/// Turn a target like `src/session.rs` into a filename-safe slug.
+fn slug(target: &str) -> String {
+    let mut s = String::new();
+    let mut prev_dash = false;
+    for ch in target.chars() {
+        if ch.is_ascii_alphanumeric() {
+            s.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            s.push('-');
+            prev_dash = true;
+        }
+    }
+    let s = s.trim_matches('-');
+    let slug: String = s.chars().take(40).collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "diff".to_string()
+    } else {
+        slug
+    }
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC, computed without a date crate.
+fn timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
+}
+
+/// Convert days-since-Unix-epoch to (year, month, day). Howard Hinnant's
+/// `civil_from_days` algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
 fn spawn(prompt: &str, model: Option<ExplainModel>) -> std::io::Result<(Child, Receiver<Msg>)> {
@@ -426,6 +586,45 @@ mod tests {
         // Structural / unrelated events produce nothing.
         assert!(parse_event(r#"{"type":"system","subtype":"init"}"#).is_none());
         assert!(parse_event("not json").is_none());
+    }
+
+    #[test]
+    fn slug_and_timestamp_are_sane() {
+        assert_eq!(slug("src/session.rs"), "src-session-rs");
+        assert_eq!(slug("feat (12 files)"), "feat-12-files");
+        assert_eq!(slug("!!!"), "diff"); // no usable chars
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        let ts = timestamp();
+        assert_eq!(ts.len(), 15); // YYYYMMDD-HHMMSS
+        assert!(ts.as_bytes()[8] == b'-');
+    }
+
+    #[test]
+    fn confirm_save_writes_the_response() {
+        let dir = std::env::temp_dir().join(format!("rudiff-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut e = Explain::Result {
+            text: "# Title\n\n- a point".to_string(),
+            is_error: false,
+            scroll: 0,
+            target: "src/foo.rs".to_string(),
+            save: Some("out.md".to_string()),
+            notice: None,
+        };
+        e.confirm_save(&dir);
+        let written = std::fs::read_to_string(dir.join("out.md")).unwrap();
+        assert!(written.contains("# rudiff explanation — src/foo.rs"));
+        assert!(written.contains("- a point"));
+        // After a successful save we leave the editor and report it.
+        assert!(!e.is_saving());
+        match &e {
+            Explain::Result {
+                notice: Some(n), ..
+            } => assert!(n.starts_with("Saved to")),
+            _ => panic!("expected a result with a notice"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

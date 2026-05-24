@@ -532,6 +532,20 @@ impl App {
             }
             return;
         }
+        // Save-filename editor: type to edit, enter to write, esc to back out.
+        if self.explain.is_saving() {
+            match key.code {
+                KeyCode::Esc => self.explain.cancel_save(),
+                KeyCode::Enter => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    self.explain.confirm_save(&cwd);
+                }
+                KeyCode::Backspace => self.explain.save_input_backspace(),
+                KeyCode::Char(c) => self.explain.save_input_push(c),
+                _ => {}
+            }
+            return;
+        }
         if self.explain.is_running() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 self.explain.cancel();
@@ -543,6 +557,7 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.explain.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.explain.scroll_by(-1),
+            KeyCode::Char('s') => self.explain.start_save(),
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('e') => {
                 self.explain.dismiss();
             }

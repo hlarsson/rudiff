@@ -49,7 +49,15 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             text,
             is_error,
             scroll,
+            save,
+            notice,
+            ..
         } => {
+            // While editing the save filename, that input takes over.
+            if let Some(filename) = save {
+                save_prompt(&theme, f, area, filename);
+                return;
+            }
             let (title, color) = if *is_error {
                 (" Explain — error ".to_string(), theme.removed)
             } else {
@@ -62,6 +70,10 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             if *scroll > max {
                 *scroll = max;
             }
+            // A save confirmation (if any) replaces the hints in the footer.
+            let footer = notice
+                .clone()
+                .unwrap_or_else(|| "j/k scroll · s save · esc/q close".to_string());
             text_panel(
                 &theme,
                 f,
@@ -69,7 +81,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 &title,
                 color,
                 lines,
-                "j/k scroll · esc/q close",
+                &footer,
                 Some(*scroll),
             );
         }
@@ -121,6 +133,40 @@ fn prompting(
 
     let block = Block::default()
         .title(" Explain with Claude ")
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(theme.chrome_style());
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// The "save to file" input popup (filename pre-filled, editable).
+fn save_prompt(theme: &Theme, f: &mut Frame, area: Rect, filename: &str) {
+    let width = 76u16.min(area.width.saturating_sub(2));
+    let popup = center(area, width, 6);
+    let inner_w = popup.width.saturating_sub(2) as usize;
+    let shown = crate::util::truncate_left(filename, inner_w.saturating_sub(4));
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Save the explanation to a Markdown file:",
+            Style::default().fg(theme.secondary),
+        )),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.accent)),
+            Span::raw(shown),
+            Span::styled("▏", Style::default().fg(theme.accent)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("enter to save · esc to cancel", theme.dim())),
+    ];
+
+    let block = Block::default()
+        .title(" Save explanation ")
         .title_style(
             Style::default()
                 .fg(theme.accent)

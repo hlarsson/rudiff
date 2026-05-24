@@ -42,8 +42,9 @@ request is rendered; `A..B` is a literal two-dot diff.
   this thread-safe?"). The response **streams in live** (with light Markdown
   formatting — headings, lists, bold, inline code) as it's generated; `esc`
   cancels it mid-flight, and the finished text stays in a scrollable overlay.
-  Pick the model (haiku / sonnet / opus) in `.rudiff.toml`. Requires `claude`
-  on your PATH.
+  Press `s` to save the response to a Markdown file (a timestamped name is
+  suggested and editable). Pick the model (haiku / sonnet / opus) in
+  `.rudiff.toml`. Requires `claude` on your PATH.
 
 <p align="center">
   <img src="docs/diff-side-by-side.png" alt="rudiff side-by-side diff view with syntax highlighting and the related-in-PR panel" width="900">
