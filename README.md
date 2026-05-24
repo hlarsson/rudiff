@@ -5,6 +5,10 @@ branch the way you'd review a pull request, as an alternative to GitHub's web UI
 
 It never modifies git state. It is a viewer, not a git client.
 
+<p align="center">
+  <img src="docs/overview.png" alt="rudiff overview screen: stats, reviewed progress bar, directory rollup, and file list" width="900">
+</p>
+
 ```
 rudiff                  # default branch vs HEAD (PR semantics)
 rudiff main             # merge-base(main, HEAD) vs HEAD
@@ -38,6 +42,11 @@ request is rendered; `A..B` is a literal two-dot diff.
   this thread-safe?"). The query runs in the background — `esc` cancels it
   mid-flight — and the response shows in a scrollable overlay. Requires `claude`
   on your PATH.
+
+<p align="center">
+  <img src="docs/diff-side-by-side.png" alt="rudiff side-by-side diff view with syntax highlighting and the related-in-PR panel" width="900">
+</p>
+<p align="center"><sub>Side-by-side diff view, with the related-in-PR panel and syntax highlighting.</sub></p>
 
 ## Keybindings
 
