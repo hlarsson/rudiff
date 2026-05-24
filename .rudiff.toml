@@ -1,0 +1,20 @@
+# Vertical slices for reviewing rudiff itself.
+# Patterns are gitignore-style globs against repo-root-relative paths
+# (`*` stops at `/`, `**` crosses directories). Files matching no group
+# fall under "Other"; a file matching several appears under each.
+
+[[group]]
+name = "Explain (Claude)"
+patterns = ["src/explain.rs", "src/ui/explain.rs", "src/ui/markdown.rs"]
+
+[[group]]
+name = "Diff engine"
+patterns = ["src/git/**"]
+
+[[group]]
+name = "Rendering"
+patterns = ["src/ui/**", "src/syntax.rs", "src/theme.rs", "src/term.rs"]
+
+[[group]]
+name = "Grouping & config"
+patterns = ["src/group.rs", "src/config.rs"]
