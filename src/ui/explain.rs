@@ -1,5 +1,5 @@
-//! Overlay for the "explain these changes" feature: a spinner while `claude`
-//! runs, then the wrapped, scrollable response.
+//! Overlay for the "explain these changes" feature: a guidance prompt, then the
+//! response streaming in live, then the final scrollable result.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -21,22 +21,52 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Explain::Idle => {}
         Explain::Prompting(p) => prompting(&theme, f, area, &p.target, &p.input),
         Explain::Running(r) => {
-            spinner(&theme, f, area, &r.target, r.started.elapsed().as_millis());
+            let elapsed = r.started.elapsed().as_millis();
+            let frame = SPINNER[(elapsed / 90) as usize % SPINNER.len()];
+            let secs = elapsed / 1000;
+            let title = format!(" {frame} Explaining {} · {secs}s ", r.target);
+            let body = if r.partial.is_empty() {
+                "Waiting for Claude…".to_string()
+            } else {
+                r.partial.clone()
+            };
+            // Stream view auto-scrolls to the bottom so the newest text shows.
+            text_panel(
+                &theme,
+                f,
+                area,
+                &title,
+                theme.accent,
+                &body,
+                "esc to cancel",
+                None,
+            );
         }
         Explain::Result {
             text,
             is_error,
             scroll,
         } => {
-            let (popup, body_h, inner_w) = result_layout(area);
-            // Clamp scroll to the wrapped content height now that we know the
-            // body width (so we never scroll into the void).
-            let wrapped = wrapped_line_count(text, inner_w);
-            let max_scroll = wrapped.saturating_sub(body_h);
-            if *scroll > max_scroll {
-                *scroll = max_scroll;
+            let (title, color) = if *is_error {
+                (" Explain — error ".to_string(), theme.removed)
+            } else {
+                (" Explanation ".to_string(), theme.accent)
+            };
+            // Clamp the stored scroll to the content, then render.
+            let max = max_scroll(area, text);
+            if *scroll > max {
+                *scroll = max;
             }
-            result(&theme, f, popup, text, *is_error, *scroll);
+            text_panel(
+                &theme,
+                f,
+                area,
+                &title,
+                color,
+                text,
+                "j/k scroll · esc/q close",
+                Some(*scroll),
+            );
         }
     }
 }
@@ -47,7 +77,7 @@ fn prompting(theme: &Theme, f: &mut Frame, area: Rect, target: &str, input: &str
     let inner_w = popup.width.saturating_sub(2) as usize;
 
     // Show the tail of the input if it's longer than the field, with a cursor.
-    let field_w = inner_w.saturating_sub(4); // "> " + cursor headroom
+    let field_w = inner_w.saturating_sub(4);
     let shown = crate::util::truncate_left(input, field_w);
 
     let lines = vec![
@@ -84,54 +114,27 @@ fn prompting(theme: &Theme, f: &mut Frame, area: Rect, target: &str, input: &str
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-fn spinner(theme: &Theme, f: &mut Frame, area: Rect, target: &str, elapsed_ms: u128) {
-    let frame = SPINNER[(elapsed_ms / 90) as usize % SPINNER.len()];
-    let secs = elapsed_ms / 1000;
+/// Render a bordered, wrapped, scrollable text panel. `scroll = None` pins the
+/// view to the bottom (used while streaming); `Some(n)` scrolls to line `n`.
+#[allow(clippy::too_many_arguments)] // a self-contained renderer; a struct would just add noise
+fn text_panel(
+    theme: &Theme,
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    title_color: ratatui::style::Color,
+    body: &str,
+    footer: &str,
+    scroll: Option<usize>,
+) {
+    let (popup, body_h, inner_w) = result_layout(area);
+    let scroll = scroll.unwrap_or_else(|| {
+        // Auto-scroll to bottom.
+        wrapped_line_count(body, inner_w).saturating_sub(body_h)
+    });
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(format!("{frame} "), Style::default().fg(theme.accent)),
-            Span::styled(
-                "Asking Claude to explain ",
-                Style::default().fg(theme.secondary),
-            ),
-            Span::styled(
-                target.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  ({secs}s)"), theme.dim()),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("press esc to cancel", theme.dim())),
-    ];
-
-    let width = 64u16.min(area.width.saturating_sub(2));
-    let popup = center(area, width, 5);
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.chrome_style());
-    f.render_widget(Clear, popup);
-    f.render_widget(Paragraph::new(lines).block(block), popup);
-}
-
-/// Popup rect, body height (lines), and inner content width for the result.
-fn result_layout(area: Rect) -> (Rect, usize, usize) {
-    let width = 84u16.min(area.width.saturating_sub(4));
-    let height = ((area.height as f32 * 0.8) as u16).max(6);
-    let popup = center(area, width, height);
-    let inner_w = popup.width.saturating_sub(2) as usize; // borders
-    let body_h = popup.height.saturating_sub(3) as usize; // borders + footer
-    (popup, body_h, inner_w.max(1))
-}
-
-fn result(theme: &Theme, f: &mut Frame, popup: Rect, text: &str, is_error: bool, scroll: usize) {
-    let (title, title_color) = if is_error {
-        (" Explain — error ", theme.removed)
-    } else {
-        (" Explanation ", theme.accent)
-    };
-    let block = Block::default()
-        .title(title)
+        .title(title.to_string())
         .title_style(
             Style::default()
                 .fg(title_color)
@@ -140,10 +143,9 @@ fn result(theme: &Theme, f: &mut Frame, popup: Rect, text: &str, is_error: bool,
         .borders(Borders::ALL)
         .border_style(theme.chrome_style());
     let inner = block.inner(popup);
-
     let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
 
-    let body: Vec<Line> = text
+    let lines: Vec<Line> = body
         .lines()
         .map(|l| {
             Line::from(Span::styled(
@@ -156,18 +158,30 @@ fn result(theme: &Theme, f: &mut Frame, popup: Rect, text: &str, is_error: bool,
     f.render_widget(Clear, popup);
     f.render_widget(block, popup);
     f.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0)),
         parts[0],
     );
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "j/k scroll · esc/q close",
-            theme.dim(),
-        ))),
+        Paragraph::new(Line::from(Span::styled(footer.to_string(), theme.dim()))),
         parts[1],
     );
+}
+
+/// Popup rect, body height (lines), and inner content width.
+fn result_layout(area: Rect) -> (Rect, usize, usize) {
+    let width = 84u16.min(area.width.saturating_sub(4));
+    let height = ((area.height as f32 * 0.8) as u16).max(6);
+    let popup = center(area, width, height);
+    let inner_w = popup.width.saturating_sub(2) as usize;
+    let body_h = popup.height.saturating_sub(3) as usize; // borders + footer
+    (popup, body_h, inner_w.max(1))
+}
+
+fn max_scroll(area: Rect, text: &str) -> usize {
+    let (_, body_h, inner_w) = result_layout(area);
+    wrapped_line_count(text, inner_w).saturating_sub(body_h)
 }
 
 /// Estimate how many terminal rows `text` occupies when wrapped to `width`.

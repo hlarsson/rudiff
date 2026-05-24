@@ -1,12 +1,14 @@
 //! "Explain these changes" — shells out to the Claude Code CLI (`claude -p`)
-//! to summarize a diff, without blocking or freezing the TUI.
+//! to summarize a diff, streaming the response as it arrives without blocking
+//! or freezing the TUI.
 //!
-//! The child runs with piped stdio; dedicated threads drain stdout/stderr so we
-//! never deadlock on a full pipe, and the [`Child`] handle stays here so the
-//! query can be killed mid-flight. The event loop calls [`Explain::poll`] each
-//! tick to pick up completion.
+//! We run `claude` with `--output-format stream-json --include-partial-messages`
+//! so it emits newline-delimited JSON events; a reader thread parses each line
+//! and forwards the text deltas over a channel. The [`Child`] handle stays here
+//! so the query can be killed mid-flight, and the event loop calls
+//! [`Explain::poll`] each tick to append new text and detect completion.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -49,15 +51,31 @@ pub struct Prompting {
 pub struct Running {
     child: Child,
     rx: Receiver<Msg>,
-    out: Option<String>,
-    err: Option<String>,
-    /// What we're explaining, for the spinner label (e.g. a file path).
+    /// Response text accumulated so far, shown live as it streams in.
+    pub partial: String,
+    /// Captured stderr (shown only if the run fails).
+    stderr: String,
+    /// Authoritative final text + error flag from the terminal `result` event.
+    result: Option<(String, bool)>,
+    /// Whether stdout / stderr have hit EOF (the process is done once both have).
+    stdout_done: bool,
+    stderr_done: bool,
+    /// What we're explaining, for the overlay label (e.g. a file path).
     pub target: String,
     pub started: Instant,
 }
 
 enum Msg {
-    Out(String),
+    /// An incremental text delta from the model.
+    Chunk(String),
+    /// The terminal `result` event: full text and whether it was an error.
+    Result {
+        text: Option<String>,
+        is_error: bool,
+    },
+    /// stdout reached EOF (the model finished or was killed).
+    OutDone,
+    /// stderr contents (sent once, at EOF).
     Err(String),
 }
 
@@ -85,8 +103,11 @@ impl Explain {
             Ok((child, rx)) => Explain::Running(Running {
                 child,
                 rx,
-                out: None,
-                err: None,
+                partial: String::new(),
+                stderr: String::new(),
+                result: None,
+                stdout_done: false,
+                stderr_done: false,
                 target,
                 started: Instant::now(),
             }),
@@ -155,33 +176,49 @@ impl Explain {
         !self.is_idle()
     }
 
-    /// Drain any output from the worker threads; once both streams have hit EOF
-    /// (the process exited or was killed), reap it and transition to `Result`.
+    /// Append any newly-streamed text from the worker threads; once both
+    /// streams have hit EOF (the process exited or was killed), reap it and
+    /// transition to `Result`.
     pub fn poll(&mut self) {
         let Explain::Running(r) = self else { return };
         while let Ok(msg) = r.rx.try_recv() {
             match msg {
-                Msg::Out(s) => r.out = Some(s),
-                Msg::Err(s) => r.err = Some(s),
+                Msg::Chunk(s) => r.partial.push_str(&s),
+                Msg::Result { text, is_error } => {
+                    r.result = Some((text.unwrap_or_default(), is_error));
+                }
+                Msg::OutDone => r.stdout_done = true,
+                Msg::Err(s) => {
+                    r.stderr = s;
+                    r.stderr_done = true;
+                }
             }
         }
-        if r.out.is_none() || r.err.is_none() {
+        if !(r.stdout_done && r.stderr_done) {
             return;
         }
-        let status = r.child.wait().ok();
-        let out = r.out.take().unwrap_or_default();
-        let err = r.err.take().unwrap_or_default();
-        let success = status.map(|s| s.success()).unwrap_or(false);
+        let success = r.child.wait().ok().map(|s| s.success()).unwrap_or(false);
 
-        let (text, is_error) = if success && !out.trim().is_empty() {
-            (out.trim().to_string(), false)
-        } else if !err.trim().is_empty() {
+        // Prefer the authoritative `result` text; fall back to the streamed
+        // partial. Surface stderr (or a generic note) when things went wrong.
+        let result_text = r.result.as_ref().map(|(t, _)| t.trim()).unwrap_or("");
+        let result_error = r.result.as_ref().map(|(_, e)| *e).unwrap_or(false);
+        let streamed = r.partial.trim();
+
+        let (text, is_error) = if !result_error && !result_text.is_empty() {
+            (result_text.to_string(), false)
+        } else if !result_error && !streamed.is_empty() {
+            (streamed.to_string(), false)
+        } else if !r.stderr.trim().is_empty() {
             (
-                format!("`claude` reported an error:\n\n{}", err.trim()),
+                format!("`claude` reported an error:\n\n{}", r.stderr.trim()),
                 true,
             )
-        } else if !out.trim().is_empty() {
-            (out.trim().to_string(), false)
+        } else if result_error && !result_text.is_empty() {
+            (result_text.to_string(), true)
+        } else if !streamed.is_empty() {
+            // Killed (cancel) or no result event, but we have partial text.
+            (streamed.to_string(), success)
         } else {
             ("`claude` returned no output.".to_string(), true)
         };
@@ -213,9 +250,16 @@ impl Explain {
 }
 
 fn spawn(prompt: &str) -> std::io::Result<(Child, Receiver<Msg>)> {
+    // `--output-format stream-json` streams newline-delimited events as they
+    // arrive; it requires `--verbose` in print mode. `--include-partial-messages`
+    // gives us token-level text deltas rather than whole messages.
     let mut child = Command::new("claude")
         .arg("-p")
         .arg(prompt)
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--include-partial-messages")
+        .arg("--verbose")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -225,13 +269,23 @@ fn spawn(prompt: &str) -> std::io::Result<(Child, Receiver<Msg>)> {
     let stderr = child.stderr.take().expect("piped stderr");
     let (tx, rx) = channel();
 
+    // stdout: parse each JSON line, forward text deltas and the final result.
     let tx_out = tx.clone();
     thread::spawn(move || {
-        let mut buf = String::new();
-        let mut stdout = stdout;
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx_out.send(Msg::Out(buf));
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(msg) = parse_event(&line)
+                && tx_out.send(msg).is_err()
+            {
+                break; // receiver gone (cancelled / quit)
+            }
+        }
+        let _ = tx_out.send(Msg::OutDone);
     });
+    // stderr: collected whole; only surfaced if the run fails.
     thread::spawn(move || {
         let mut buf = String::new();
         let mut stderr = stderr;
@@ -240,6 +294,28 @@ fn spawn(prompt: &str) -> std::io::Result<(Child, Receiver<Msg>)> {
     });
 
     Ok((child, rx))
+}
+
+/// Translate one stream-json line into a [`Msg`], if it carries text or the
+/// final result. Unknown / structural events yield `None`.
+fn parse_event(line: &str) -> Option<Msg> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    match v["type"].as_str()? {
+        "stream_event" => {
+            let event = &v["event"];
+            if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
+                let text = event["delta"]["text"].as_str()?;
+                Some(Msg::Chunk(text.to_string()))
+            } else {
+                None
+            }
+        }
+        "result" => Some(Msg::Result {
+            text: v["result"].as_str().map(str::to_string),
+            is_error: v["is_error"].as_bool().unwrap_or(false),
+        }),
+        _ => None,
+    }
 }
 
 /// Render a file's diff as plain `git diff`-style unified text for the prompt.
@@ -279,6 +355,29 @@ mod tests {
         assert!(text.contains("-b"));
         assert!(text.contains("+B"));
         assert!(text.contains(" a")); // context line
+    }
+
+    #[test]
+    fn parses_text_delta_and_result_events() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#;
+        match parse_event(delta) {
+            Some(Msg::Chunk(s)) => assert_eq!(s, "Hello"),
+            _ => panic!("expected a text chunk"),
+        }
+
+        let result =
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello world"}"#;
+        match parse_event(result) {
+            Some(Msg::Result { text, is_error }) => {
+                assert_eq!(text.as_deref(), Some("Hello world"));
+                assert!(!is_error);
+            }
+            _ => panic!("expected a result"),
+        }
+
+        // Structural / unrelated events produce nothing.
+        assert!(parse_event(r#"{"type":"system","subtype":"init"}"#).is_none());
+        assert!(parse_event("not json").is_none());
     }
 
     #[test]

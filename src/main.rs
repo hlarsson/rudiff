@@ -100,10 +100,15 @@ fn snapshot(
         app.feed_keys(keys);
     }
 
-    // If a key script kicked off an async `claude` query, pump it to completion
-    // (bounded) so the snapshot can capture the result rather than the spinner.
+    // If a key script kicked off an async `claude` query, pump it so the
+    // snapshot captures real output. By default we run to completion; set
+    // RUDIFF_SNAPSHOT_PUMP_MS to capture a mid-stream frame instead.
+    let cap_ms: u128 = std::env::var("RUDIFF_SNAPSHOT_PUMP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90_000);
     let started = std::time::Instant::now();
-    while app.explain.is_running() && started.elapsed() < std::time::Duration::from_secs(90) {
+    while app.explain.is_running() && started.elapsed().as_millis() < cap_ms {
         app.explain.poll();
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

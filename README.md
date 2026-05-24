@@ -39,9 +39,9 @@ request is rendered; `A..B` is a literal two-dot diff.
 - **Explain with Claude** — press `e` to ask the Claude Code CLI (`claude -p`)
   to summarize the current file's diff (or the whole branch from the overview).
   A popup lets you add optional guidance first (e.g. "focus on security" or "is
-  this thread-safe?"). The query runs in the background — `esc` cancels it
-  mid-flight — and the response shows in a scrollable overlay. Requires `claude`
-  on your PATH.
+  this thread-safe?"). The response **streams in live** as it's generated;
+  `esc` cancels it mid-flight, and the finished text stays in a scrollable
+  overlay. Requires `claude` on your PATH.
 
 <p align="center">
   <img src="docs/diff-side-by-side.png" alt="rudiff side-by-side diff view with syntax highlighting and the related-in-PR panel" width="900">
