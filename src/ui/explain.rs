@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::explain::Explain;
+use crate::explain::{Explain, ExplainModel};
 use crate::theme::Theme;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -19,12 +19,16 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let theme = app.theme; // `Theme` is Copy, so this doesn't borrow `app`.
     match &mut app.explain {
         Explain::Idle => {}
-        Explain::Prompting(p) => prompting(&theme, f, area, &p.target, &p.input),
+        Explain::Prompting(p) => prompting(&theme, f, area, &p.target, &p.input, p.model),
         Explain::Running(r) => {
             let elapsed = r.started.elapsed().as_millis();
             let frame = SPINNER[(elapsed / 90) as usize % SPINNER.len()];
             let secs = elapsed / 1000;
-            let title = format!(" {frame} Explaining {} · {secs}s ", r.target);
+            let model = r
+                .model
+                .map(|m| format!("{} · ", m.alias()))
+                .unwrap_or_default();
+            let title = format!(" {frame} Explaining {} · {model}{secs}s ", r.target);
             let body = if r.partial.is_empty() {
                 "Waiting for Claude…".to_string()
             } else {
@@ -71,7 +75,14 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     }
 }
 
-fn prompting(theme: &Theme, f: &mut Frame, area: Rect, target: &str, input: &str) {
+fn prompting(
+    theme: &Theme,
+    f: &mut Frame,
+    area: Rect,
+    target: &str,
+    input: &str,
+    model: Option<ExplainModel>,
+) {
     let width = 72u16.min(area.width.saturating_sub(2));
     let popup = center(area, width, 7);
     let inner_w = popup.width.saturating_sub(2) as usize;
@@ -80,14 +91,20 @@ fn prompting(theme: &Theme, f: &mut Frame, area: Rect, target: &str, input: &str
     let field_w = inner_w.saturating_sub(4);
     let shown = crate::util::truncate_left(input, field_w);
 
+    // First line: "Explain <target>" plus the model tag when configured.
+    let mut header = vec![
+        Span::styled("Explain ", Style::default().fg(theme.secondary)),
+        Span::styled(
+            target.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(m) = model {
+        header.push(Span::styled(format!("   ({})", m.alias()), theme.dim()));
+    }
+
     let lines = vec![
-        Line::from(vec![
-            Span::styled("Explain ", Style::default().fg(theme.secondary)),
-            Span::styled(
-                target.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(header),
         Line::from(Span::styled(
             "Add guidance (optional), e.g. \"focus on edge cases\":",
             theme.dim(),

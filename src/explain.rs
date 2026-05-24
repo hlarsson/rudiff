@@ -21,6 +21,35 @@ use crate::git::model::{DiffLine, FileDiff};
 /// keep the request cheap; an explanation doesn't need every last line.
 pub const MAX_DIFF_BYTES: usize = 60 * 1024;
 
+/// Which Claude model to use for `e`, configurable via `.rudiff.toml`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExplainModel {
+    Haiku,
+    Sonnet,
+    Opus,
+}
+
+impl ExplainModel {
+    /// Parse a config value (case-insensitive). `None` for unrecognized names.
+    pub fn from_name(s: &str) -> Option<ExplainModel> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "haiku" => Some(ExplainModel::Haiku),
+            "sonnet" => Some(ExplainModel::Sonnet),
+            "opus" => Some(ExplainModel::Opus),
+            _ => None,
+        }
+    }
+
+    /// The alias passed to `claude --model` (also used as the display label).
+    pub fn alias(self) -> &'static str {
+        match self {
+            ExplainModel::Haiku => "haiku",
+            ExplainModel::Sonnet => "sonnet",
+            ExplainModel::Opus => "opus",
+        }
+    }
+}
+
 /// State of the explain overlay.
 pub enum Explain {
     Idle,
@@ -42,6 +71,8 @@ pub struct Prompting {
     pub input: String,
     /// What we're explaining, for the popup label.
     pub target: String,
+    /// Model to use (from config); `None` uses `claude`'s default.
+    pub model: Option<ExplainModel>,
     /// Base instruction; the guidance is appended on submit.
     instruction: String,
     /// The diff to explain, rendered once when `e` was pressed.
@@ -62,6 +93,8 @@ pub struct Running {
     stderr_done: bool,
     /// What we're explaining, for the overlay label (e.g. a file path).
     pub target: String,
+    /// Model in use, for the overlay label.
+    pub model: Option<ExplainModel>,
     pub started: Instant,
 }
 
@@ -83,7 +116,12 @@ impl Explain {
     /// Kick off `claude -p` to explain `diff_text`. The instruction is the
     /// prompt; the diff is appended to it. Failure to even spawn (e.g. `claude`
     /// not on PATH) lands directly in a `Result` error state.
-    pub fn start(instruction: &str, diff_text: &str, target: String) -> Explain {
+    pub fn start(
+        instruction: &str,
+        diff_text: &str,
+        target: String,
+        model: Option<ExplainModel>,
+    ) -> Explain {
         let mut prompt = String::with_capacity(instruction.len() + diff_text.len() + 16);
         prompt.push_str(instruction);
         prompt.push_str("\n\n```diff\n");
@@ -99,7 +137,7 @@ impl Explain {
         }
         prompt.push_str("```\n");
 
-        match spawn(&prompt) {
+        match spawn(&prompt, model) {
             Ok((child, rx)) => Explain::Running(Running {
                 child,
                 rx,
@@ -109,6 +147,7 @@ impl Explain {
                 stdout_done: false,
                 stderr_done: false,
                 target,
+                model,
                 started: Instant::now(),
             }),
             Err(e) => Explain::Result {
@@ -123,10 +162,16 @@ impl Explain {
     }
 
     /// Open the guidance popup for a captured request (does not spawn yet).
-    pub fn prompt(instruction: String, diff_text: String, target: String) -> Explain {
+    pub fn prompt(
+        instruction: String,
+        diff_text: String,
+        target: String,
+        model: Option<ExplainModel>,
+    ) -> Explain {
         Explain::Prompting(Prompting {
             input: String::new(),
             target,
+            model,
             instruction,
             diff_text,
         })
@@ -143,7 +188,7 @@ impl Explain {
                     .push_str("\n\nThe reviewer specifically asks you to focus on / answer this: ");
                 instruction.push_str(guidance);
             }
-            *self = Explain::start(&instruction, &p.diff_text, p.target);
+            *self = Explain::start(&instruction, &p.diff_text, p.target, p.model);
         }
     }
 
@@ -249,12 +294,12 @@ impl Explain {
     }
 }
 
-fn spawn(prompt: &str) -> std::io::Result<(Child, Receiver<Msg>)> {
+fn spawn(prompt: &str, model: Option<ExplainModel>) -> std::io::Result<(Child, Receiver<Msg>)> {
     // `--output-format stream-json` streams newline-delimited events as they
     // arrive; it requires `--verbose` in print mode. `--include-partial-messages`
     // gives us token-level text deltas rather than whole messages.
-    let mut child = Command::new("claude")
-        .arg("-p")
+    let mut cmd = Command::new("claude");
+    cmd.arg("-p")
         .arg(prompt)
         .arg("--output-format")
         .arg("stream-json")
@@ -262,8 +307,11 @@ fn spawn(prompt: &str) -> std::io::Result<(Child, Receiver<Msg>)> {
         .arg("--verbose")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model.alias());
+    }
+    let mut child = cmd.spawn()?;
 
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -383,7 +431,7 @@ mod tests {
     #[test]
     fn missing_claude_yields_error_result() {
         // Spawning a bogus binary should land in an error Result, not panic.
-        let mut e = Explain::start("explain", "diff", "x".into());
+        let mut e = Explain::start("explain", "diff", "x".into(), None);
         // If `claude` happens to exist we'll get Running; otherwise an error.
         // Either way it must be active and must not panic when polled.
         e.poll();

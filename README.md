@@ -41,7 +41,8 @@ request is rendered; `A..B` is a literal two-dot diff.
   A popup lets you add optional guidance first (e.g. "focus on security" or "is
   this thread-safe?"). The response **streams in live** as it's generated;
   `esc` cancels it mid-flight, and the finished text stays in a scrollable
-  overlay. Requires `claude` on your PATH.
+  overlay. Pick the model (haiku / sonnet / opus) in `.rudiff.toml`. Requires
+  `claude` on your PATH.
 
 <p align="center">
   <img src="docs/diff-side-by-side.png" alt="rudiff side-by-side diff view with syntax highlighting and the related-in-PR panel" width="900">
@@ -76,6 +77,16 @@ patterns = ["server/billing/**"]
 Files matching no group fall under "Other"; a file matching several groups
 appears under each (counted once in totals). Pass `--no-config` to ignore the
 file, or `--config <path>` to point at a specific one.
+
+An optional `[explain]` table picks the model used by the `e` command:
+
+```toml
+[explain]
+model = "sonnet"   # one of: haiku, sonnet, opus
+```
+
+When unset, `claude`'s own default model is used. An unrecognized value is
+warned about and ignored.
 
 ## Building
 

@@ -10,6 +10,13 @@
 //! Groups are intentionally flat (no nesting) — they model vertical domain
 //! slices, not layers. A file may match several groups (it then appears under
 //! each); unmatched files fall under "Other".
+//!
+//! An optional `[explain]` table chooses the model for the `e` command:
+//!
+//! ```toml
+//! [explain]
+//! model = "sonnet"   # haiku | sonnet | opus
+//! ```
 
 use std::path::Path;
 
@@ -17,10 +24,14 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
+use crate::explain::ExplainModel;
+
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default)]
     group: Vec<RawGroup>,
+    #[serde(default)]
+    explain: Option<RawExplain>,
 }
 
 #[derive(Deserialize)]
@@ -30,8 +41,15 @@ struct RawGroup {
     patterns: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct RawExplain {
+    model: Option<String>,
+}
+
 pub struct Config {
     groups: Vec<GroupMatcher>,
+    /// Model for the `e` command; `None` => `claude`'s default.
+    explain_model: Option<ExplainModel>,
 }
 
 struct GroupMatcher {
@@ -90,7 +108,28 @@ impl Config {
             let set = builder.build().context("failed to build glob set")?;
             groups.push(GroupMatcher { name: g.name, set });
         }
-        Ok(Config { groups })
+
+        // Explain model: parse leniently — an unknown name is a warning, not a
+        // hard error, so a typo doesn't make the whole config unusable.
+        let explain_model = raw.explain.and_then(|e| e.model).and_then(|m| {
+            let parsed = ExplainModel::from_name(&m);
+            if parsed.is_none() {
+                eprintln!(
+                    "rudiff: ignoring unknown explain model {m:?} (expected haiku, sonnet, or opus)"
+                );
+            }
+            parsed
+        });
+
+        Ok(Config {
+            groups,
+            explain_model,
+        })
+    }
+
+    /// The configured model for the `e` command, if any.
+    pub fn explain_model(&self) -> Option<ExplainModel> {
+        self.explain_model
     }
 
     /// Indices of the groups a path belongs to (empty => "Other").
@@ -112,6 +151,37 @@ impl Config {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn parses_explain_model() {
+        assert_eq!(
+            Config::parse("[explain]\nmodel = \"sonnet\"\n")
+                .unwrap()
+                .explain_model(),
+            Some(ExplainModel::Sonnet)
+        );
+        // Case-insensitive.
+        assert_eq!(
+            Config::parse("[explain]\nmodel = \"OPUS\"\n")
+                .unwrap()
+                .explain_model(),
+            Some(ExplainModel::Opus)
+        );
+        // Unknown model is ignored (warns), not a hard error.
+        assert_eq!(
+            Config::parse("[explain]\nmodel = \"gpt\"\n")
+                .unwrap()
+                .explain_model(),
+            None
+        );
+        // Absent => None.
+        assert_eq!(
+            Config::parse("[[group]]\nname=\"A\"\npatterns=[\"x/**\"]\n")
+                .unwrap()
+                .explain_model(),
+            None
+        );
+    }
 
     #[test]
     fn matches_gitignore_style_globs() {

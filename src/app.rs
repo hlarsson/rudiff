@@ -337,6 +337,8 @@ pub struct App {
     pub show_commits: bool,
     /// "Explain these changes" query/overlay state.
     pub explain: crate::explain::Explain,
+    /// Model for the `e` command, from `.rudiff.toml` (`None` => claude default).
+    explain_model: Option<crate::explain::ExplainModel>,
     /// True while `/` search capture is active in the diff view.
     pub diff_searching: bool,
     /// Pending first key of a two-key sequence (`g`, `z`, `]`, `[`).
@@ -352,6 +354,7 @@ pub struct App {
 impl App {
     pub fn new(repo: Repo, changeset: Changeset, cli: &Cli, config: Option<Config>) -> App {
         let grouping = group::build(&changeset.files, config.as_ref());
+        let explain_model = config.as_ref().and_then(|c| c.explain_model());
         let viewed = Viewed::load(repo.git_dir());
         let order: Vec<usize> = (0..changeset.files.len()).collect();
         let theme = Theme::detect();
@@ -382,6 +385,7 @@ impl App {
             show_help: false,
             show_commits: false,
             explain: crate::explain::Explain::Idle,
+            explain_model,
             diff_searching: false,
             pending: None,
             flash: None,
@@ -584,7 +588,8 @@ impl App {
             return;
         }
         // Open the guidance popup; the query fires on submit.
-        self.explain = crate::explain::Explain::prompt(instruction, diff_text, target);
+        self.explain =
+            crate::explain::Explain::prompt(instruction, diff_text, target, self.explain_model);
     }
 
     /// Concatenated unified diff of the whole changeset, capped to keep the
