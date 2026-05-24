@@ -16,6 +16,12 @@ pub struct Cli {
     #[arg(value_name = "REVSPEC", verbatim_doc_comment)]
     pub revspec: Option<String>,
 
+    /// Review uncommitted changes: the working tree vs HEAD (like `git diff
+    /// HEAD`). Shows staged and unstaged edits to tracked files; untracked
+    /// files are not included. Cannot be combined with a REVSPEC.
+    #[arg(short = 'u', long, conflicts_with = "revspec")]
+    pub uncommitted: bool,
+
     /// Force unified (single-column) layout.
     #[arg(long, conflicts_with = "side_by_side")]
     pub unified: bool,

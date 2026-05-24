@@ -339,6 +339,12 @@ pub struct App {
     pub explain: crate::explain::Explain,
     /// Model for the `e` command, from `.rudiff.toml` (`None` => claude default).
     explain_model: Option<crate::explain::ExplainModel>,
+    /// The active group config, retained so the rollup can be rebuilt when the
+    /// file set changes (toggling untracked files in the uncommitted view).
+    config: Option<Config>,
+    /// In the uncommitted-changes view, whether untracked files are shown.
+    /// Toggled with `t`; ignored outside that view.
+    show_untracked: bool,
     /// True while `/` search capture is active in the diff view.
     pub diff_searching: bool,
     /// Pending first key of a two-key sequence (`g`, `z`, `]`, `[`).
@@ -355,6 +361,9 @@ impl App {
     pub fn new(repo: Repo, changeset: Changeset, cli: &Cli, config: Option<Config>) -> App {
         let grouping = group::build(&changeset.files, config.as_ref());
         let explain_model = config.as_ref().and_then(|c| c.explain_model());
+        // Matches the initial build in `main` (untracked shown in the
+        // uncommitted view); only consulted while `changeset.is_working`.
+        let show_untracked = true;
         let viewed = Viewed::load(repo.git_dir());
         let order: Vec<usize> = (0..changeset.files.len()).collect();
         let theme = Theme::detect();
@@ -386,6 +395,8 @@ impl App {
             show_commits: false,
             explain: crate::explain::Explain::Idle,
             explain_model,
+            config,
+            show_untracked,
             diff_searching: false,
             pending: None,
             flash: None,
@@ -695,6 +706,7 @@ impl App {
                 self.ov.filtering = true;
             }
             (KeyCode::Char('v'), _) => self.toggle_viewed_selection(),
+            (KeyCode::Char('t'), _) => self.toggle_untracked(),
             (KeyCode::Char(' '), _) => self.toggle_mark(),
             (KeyCode::Char('c'), _) => self.show_commits = true,
             (KeyCode::Char('o'), _) => {
@@ -1267,6 +1279,39 @@ impl App {
 
     /// Recompute the display order from the current sort + filter, clamping the
     /// cursor to stay in bounds.
+    /// Toggle whether untracked files appear in the uncommitted-changes view.
+    /// Rebuilds the changeset (and the group rollup) so the stats, groups, and
+    /// file list all stay consistent. No-op outside that view.
+    fn toggle_untracked(&mut self) {
+        if !self.changeset.is_working {
+            self.flash = Some("untracked toggle applies only to --uncommitted".to_string());
+            return;
+        }
+        self.show_untracked = !self.show_untracked;
+        match self.repo.build_working_changeset(self.show_untracked) {
+            Ok(cs) => {
+                self.changeset = cs;
+                self.grouping = group::build(&self.changeset.files, self.config.as_ref());
+                // File indices change meaning when the set changes; drop the
+                // transient multi-selection rather than mis-targeting it.
+                self.ov.marked.clear();
+                self.ov.offset = 0;
+                self.recompute_order();
+                let n = self.changeset.files.len();
+                self.flash = Some(if self.show_untracked {
+                    format!("showing untracked files ({n} total)")
+                } else {
+                    format!("hiding untracked files ({n} total)")
+                });
+            }
+            Err(e) => {
+                // Keep state consistent if the refresh failed.
+                self.show_untracked = !self.show_untracked;
+                self.flash = Some(format!("could not refresh: {e}"));
+            }
+        }
+    }
+
     fn recompute_order(&mut self) {
         let filter = self.ov.filter.to_lowercase();
         let files = &self.changeset.files;

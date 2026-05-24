@@ -7,6 +7,7 @@
 pub mod diff;
 pub mod model;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -231,7 +232,161 @@ impl Repo {
             head_name: resolved.head_name,
             files,
             commits,
+            is_working: false,
         })
+    }
+
+    /// Build the changeset for uncommitted changes: the working tree vs HEAD,
+    /// mirroring `git diff HEAD`. Tracked files with staged and/or unstaged
+    /// edits are always included; untracked files (gitignored ones excluded)
+    /// are included when `show_untracked`. There is no commit range, so
+    /// `commits` is empty.
+    pub fn build_working_changeset(&self, show_untracked: bool) -> Result<Changeset> {
+        use gix::dir::entry::{Kind, Status};
+        use gix::status::Item;
+        use gix::status::index_worktree::Item as IwItem;
+
+        let head_id = self
+            .resolve_commit("HEAD")
+            .context("cannot resolve HEAD (does the branch have any commits yet?)")?;
+        let head_tree = self.inner.find_commit(head_id)?.tree()?;
+
+        // Use `git status` only to find *candidate* paths (anything differing
+        // across HEAD / index / worktree). We then re-derive each file's net
+        // HEAD↔worktree change directly, so a path that is staged and then
+        // reverted in the worktree correctly drops out. The bool records
+        // whether the path is untracked (a new file not in the index).
+        let mut paths: BTreeMap<PathBuf, bool> = BTreeMap::new();
+        let untracked_mode = if show_untracked {
+            gix::status::UntrackedFiles::Files
+        } else {
+            gix::status::UntrackedFiles::None
+        };
+        let iter = self
+            .inner
+            .status(gix::progress::Discard)
+            .context("cannot compute working-tree status")?
+            .untracked_files(untracked_mode)
+            .into_iter(Vec::<gix::bstr::BString>::new())
+            .context("cannot iterate working-tree status")?;
+        for item in iter {
+            let item = item.context("error reading working-tree status")?;
+            match item {
+                // Entries surfaced by the directory walk: keep genuinely
+                // untracked regular files/symlinks (not ignored, not dirs).
+                Item::IndexWorktree(IwItem::DirectoryContents { entry, .. }) => {
+                    if entry.status == Status::Untracked
+                        && matches!(entry.disk_kind, Some(Kind::File) | Some(Kind::Symlink))
+                    {
+                        paths.entry(bstr_to_path(entry.rela_path.as_ref())).or_insert(true);
+                    }
+                }
+                // Everything else (HEAD↔index, index↔worktree, rewrites) is a
+                // change to a tracked path.
+                other => {
+                    paths.entry(bstr_to_path(other.location())).or_insert(false);
+                }
+            }
+        }
+
+        let mut files: Vec<FileChange> = paths
+            .into_iter()
+            .filter_map(|(p, untracked)| self.working_file_change(&head_tree, p, untracked))
+            .collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let base_name = self.current_branch().unwrap_or_else(|| "HEAD".to_string());
+        Ok(Changeset {
+            base: head_id,
+            // No distinct head object exists for the working tree; reuse HEAD.
+            head: head_id,
+            base_name,
+            head_name: "working tree".to_string(),
+            files,
+            commits: Vec::new(),
+            is_working: true,
+        })
+    }
+
+    /// Derive one file's HEAD→worktree change. Old side is the HEAD blob (if
+    /// any), new side is the on-disk file (if any). Returns `None` when the two
+    /// sides are equal (no net change) or for submodules/trees.
+    fn working_file_change(
+        &self,
+        head_tree: &gix::Tree<'_>,
+        path: PathBuf,
+        untracked: bool,
+    ) -> Option<FileChange> {
+        let head_entry = head_tree.lookup_entry_by_path(&path).ok().flatten();
+        let head_kind = head_entry.as_ref().map(|e| e.mode().kind());
+        // Submodules (gitlinks) and directories are out of scope for this view.
+        if matches!(head_kind, Some(EntryKind::Commit) | Some(EntryKind::Tree)) {
+            return None;
+        }
+        let old_id = head_entry.as_ref().map(|e| e.object_id());
+
+        let full = self.root.join(&path);
+        let wt_meta = std::fs::symlink_metadata(&full).ok();
+        let new_exists = wt_meta.is_some();
+        if old_id.is_none() && !new_exists {
+            return None; // absent on both sides (e.g. staged add then deleted)
+        }
+
+        let status = if old_id.is_none() {
+            FileStatus::Added
+        } else if !new_exists {
+            FileStatus::Deleted
+        } else {
+            FileStatus::Modified
+        };
+
+        let (old_text, old_bin, old_size) = self.read_blob(old_id.as_ref());
+        let (new_text, new_bin, new_size) = self.read_worktree(&path);
+
+        let mk = |special, additions, deletions, content_hash| {
+            Some(FileChange {
+                path: path.clone(),
+                old_path: None,
+                status,
+                additions,
+                deletions,
+                content_hash,
+                special,
+                old_id,
+                new_id: None,
+                new_in_worktree: true,
+                untracked,
+            })
+        };
+
+        if old_bin || new_bin {
+            let mut hasher = seahash::SeaHasher::new();
+            std::hash::Hasher::write(&mut hasher, path.to_string_lossy().as_bytes());
+            if let Some(id) = &old_id {
+                std::hash::Hasher::write(&mut hasher, id.as_slice());
+            }
+            std::hash::Hasher::write(&mut hasher, &new_size.to_le_bytes());
+            let h = std::hash::Hasher::finish(&hasher);
+            return mk(Special::Binary { old_size, new_size }, 0, 0, h);
+        }
+
+        // A modification whose net content equals HEAD (e.g. staged then
+        // reverted in the worktree) is not a real change — drop it. An add or
+        // delete is always real, even when the present side is empty.
+        if status == FileStatus::Modified && old_text == new_text {
+            return None;
+        }
+
+        let is_symlink = matches!(head_kind, Some(EntryKind::Link))
+            || wt_meta.is_some_and(|m| m.file_type().is_symlink());
+        let special = if is_symlink {
+            Special::Symlink
+        } else {
+            Special::None
+        };
+        let (additions, deletions) = diff::count_stats(&old_text, &new_text);
+        let content_hash = diff::content_hash(&path, &old_text, &new_text);
+        mk(special, additions, deletions, content_hash)
     }
 
     /// Walk commits reachable from `head` but not from `base`.
@@ -367,6 +522,8 @@ impl Repo {
                 special: Special::Submodule,
                 old_id,
                 new_id,
+                new_in_worktree: false,
+                untracked: false,
             });
         }
 
@@ -392,6 +549,8 @@ impl Repo {
                 special: Special::Binary { old_size, new_size },
                 old_id,
                 new_id,
+                new_in_worktree: false,
+                untracked: false,
             });
         }
 
@@ -413,6 +572,8 @@ impl Repo {
             special,
             old_id,
             new_id,
+            new_in_worktree: false,
+            untracked: false,
         })
     }
 
@@ -431,6 +592,45 @@ impl Repo {
                 }
             }
             Err(_) => (String::new(), false, 0),
+        }
+    }
+
+    /// Read a working-tree file's text. Returns `(text, is_binary, size)`.
+    /// A symlink yields its target path (matching how git stores link content);
+    /// a missing file yields empty/not-binary (the "deleted" side).
+    fn read_worktree(&self, path: &Path) -> (String, bool, u64) {
+        let full = self.root.join(path);
+        match std::fs::symlink_metadata(&full) {
+            Ok(md) if md.file_type().is_symlink() => match std::fs::read_link(&full) {
+                Ok(target) => {
+                    let s = target.to_string_lossy().into_owned();
+                    let n = s.len() as u64;
+                    (s, false, n)
+                }
+                Err(_) => (String::new(), false, 0),
+            },
+            Ok(md) if md.is_file() => match std::fs::read(&full) {
+                Ok(bytes) => {
+                    let size = bytes.len() as u64;
+                    if diff::looks_binary(&bytes) {
+                        (String::new(), true, size)
+                    } else {
+                        (String::from_utf8_lossy(&bytes).into_owned(), false, size)
+                    }
+                }
+                Err(_) => (String::new(), false, 0),
+            },
+            _ => (String::new(), false, 0),
+        }
+    }
+
+    /// Read the *new* side of a change: from disk in uncommitted-changes mode,
+    /// otherwise from the `new_id` blob.
+    fn read_new_side(&self, fc: &FileChange) -> (String, bool, u64) {
+        if fc.new_in_worktree {
+            self.read_worktree(&fc.path)
+        } else {
+            self.read_blob(fc.new_id.as_ref())
         }
     }
 
@@ -470,7 +670,7 @@ impl Repo {
             }
             Special::None | Special::Symlink => {
                 let (old_text, _, _) = self.read_blob(fc.old_id.as_ref());
-                let (new_text, _, _) = self.read_blob(fc.new_id.as_ref());
+                let (new_text, _, _) = self.read_new_side(fc);
                 diff::build_file_diff(&old_text, &new_text, context, ignore_ws)
             }
         }
@@ -483,7 +683,7 @@ impl Repo {
             return (String::new(), String::new());
         }
         let (old, _, _) = self.read_blob(fc.old_id.as_ref());
-        let (new, _, _) = self.read_blob(fc.new_id.as_ref());
+        let (new, _, _) = self.read_new_side(fc);
         (old, new)
     }
 }

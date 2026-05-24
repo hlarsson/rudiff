@@ -16,6 +16,7 @@ rudiff main..feature    # direct diff main → feature
 rudiff main...feature   # merge-base diff (PR semantics)
 rudiff abc123           # merge-base(abc123, HEAD) vs HEAD
 rudiff abc123..def456   # arbitrary range
+rudiff -u               # working tree vs HEAD (like `git diff HEAD`)
 ```
 
 Bare refs and `A...B` use three-dot (merge-base) semantics, matching how a pull
@@ -25,6 +26,11 @@ request is rendered; `A..B` is a literal two-dot diff.
 
 - **Overview screen** — stats, a prominent *reviewed* progress bar, a rollup of
   changes by group (or directory), and a navigable file list.
+- **Uncommitted-changes view** — `-u`/`--uncommitted` reviews your working tree
+  against HEAD (like `git diff HEAD`): staged and unstaged edits to tracked
+  files, plus untracked files (gitignored ones excluded). Press `t` to
+  show/hide the untracked files. Useful for reviewing your own work before
+  committing. Mutually exclusive with a revspec argument.
 - **Diff view** — unified or side-by-side, with syntax highlighting, enclosing
   function context in hunk headers, intra-line (changed-character) highlighting,
   and folded context you can expand.
@@ -58,7 +64,7 @@ Press `?` in the app for the full list. Highlights:
 | Context  | Keys |
 |----------|------|
 | Global   | `q` quit · `?` help · `e` explain with Claude · `esc` back/cancel |
-| Overview | `j`/`k` move · `⏎` open · `v` viewed · `space` multi-select · `/` filter · `s` sort · `c` commits |
+| Overview | `j`/`k` move · `⏎` open · `v` viewed · `space` multi-select · `/` filter · `s` sort · `t` untracked (`--uncommitted`) · `c` commits |
 | Diff     | `]h`/`[h` hunk · `]f`/`[f` file · `]r`/`[r` related · `o` overview · `v` viewed+next · `s` unified/side-by-side · `w` whitespace · `z`/`Z`/`zR`/`zM` folds · `/` `n` `N` search |
 
 ## Configuration: `.rudiff.toml`

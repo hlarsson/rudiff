@@ -103,7 +103,7 @@ fn file_header(app: &App, fc: &FileChange, w: u16) -> Vec<Line<'static>> {
         Span::styled(dot.to_string(), dot_style),
         Span::raw(" "),
         Span::styled(
-            fc.status.letter().to_string(),
+            fc.display_letter().to_string(),
             theme.status_style(fc.status),
         ),
         Span::raw(" "),

@@ -34,8 +34,13 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo = git::Repo::discover(&cwd)?;
-    let spec = git::RangeSpec::parse(cli.revspec.as_deref());
-    let changeset = repo.build_changeset(&spec)?;
+    let changeset = if cli.uncommitted {
+        // Untracked files are shown by default; toggled at runtime with `t`.
+        repo.build_working_changeset(true)?
+    } else {
+        let spec = git::RangeSpec::parse(cli.revspec.as_deref());
+        repo.build_changeset(&spec)?
+    };
     let config = load_config(&cli, &cwd, repo.root());
 
     if cli.print {
@@ -175,7 +180,7 @@ fn print_changeset(repo: &git::Repo, cs: &git::model::Changeset) {
             .unwrap_or_default();
         println!(
             "  {} {:<30} +{:<4} -{:<4} hash={:016x}{}{}",
-            f.status.letter(),
+            f.display_letter(),
             f.path.display(),
             f.additions,
             f.deletions,

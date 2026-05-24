@@ -81,14 +81,18 @@ fn stats_line(app: &App) -> Line<'static> {
             theme.removed_style(),
         ),
         Span::styled(" lines", theme.dim()),
-        Span::raw("   "),
-        Span::styled(plural(cs.commits.len(), "commit"), theme.dim()),
-        Span::raw("   "),
-        Span::styled(plural(cs.author_count(), "author"), theme.dim()),
     ];
-    if let Some(oldest) = cs.oldest_commit_secs() {
+    // Commit/author/age only make sense for a commit range, not the working
+    // tree, where there is no range to summarize.
+    if !cs.is_working {
         spans.push(Span::raw("   "));
-        spans.push(Span::styled(relative_age(oldest, now), theme.dim()));
+        spans.push(Span::styled(plural(cs.commits.len(), "commit"), theme.dim()));
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(plural(cs.author_count(), "author"), theme.dim()));
+        if let Some(oldest) = cs.oldest_commit_secs() {
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(relative_age(oldest, now), theme.dim()));
+        }
     }
     Line::from(spans)
 }
@@ -224,10 +228,12 @@ fn render_files(app: &mut App, f: &mut Frame, area: Rect) {
 
     // Empty states: nothing changed, or a filter that matches nothing.
     if total == 0 {
-        let msg = if app.changeset.files.is_empty() {
-            "No changes between these revisions."
-        } else {
+        let msg = if !app.changeset.files.is_empty() {
             "No files match the filter."
+        } else if app.changeset.is_working {
+            "No uncommitted changes (working tree matches HEAD)."
+        } else {
+            "No changes between these revisions."
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -331,7 +337,7 @@ fn file_row(
         Span::styled(dot.to_string(), dot_style),
         Span::raw(" "),
         Span::styled(
-            fc.status.letter().to_string(),
+            fc.display_letter().to_string(),
             theme.status_style(fc.status),
         ),
         Span::raw(" "),
@@ -375,7 +381,7 @@ fn annotation_for(
     if let Special::Binary { .. } = fc.special {
         return Some(("binary", theme.dim()));
     }
-    fc.status.annotation().map(|a| {
+    fc.display_annotation().map(|a| {
         (
             a,
             Style::default().fg(theme.status_style(fc.status).fg.unwrap_or(theme.secondary)),
@@ -387,16 +393,18 @@ fn render_footer(app: &App, f: &mut Frame, area: Rect) {
     let theme = &app.theme;
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     f.render_widget(Paragraph::new(rule(area.width, theme)), parts[0]);
-    let hints = [
+    let mut hints = vec![
         ("j/k", "nav"),
         ("⏎", "open"),
         ("v", "viewed"),
         ("/", "search"),
         ("s", "sort"),
-        ("c", "commits"),
-        ("?", "help"),
-        ("q", "quit"),
     ];
+    // The untracked toggle only does anything in the uncommitted view.
+    if app.changeset.is_working {
+        hints.push(("t", "untracked"));
+    }
+    hints.extend([("c", "commits"), ("?", "help"), ("q", "quit")]);
     f.render_widget(
         Paragraph::new(footer(&hints, app.flash.as_deref(), theme)),
         parts[1],

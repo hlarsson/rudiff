@@ -70,11 +70,38 @@ pub struct FileChange {
     /// (e.g. `old_id` for an Added file).
     pub old_id: Option<ObjectId>,
     pub new_id: Option<ObjectId>,
+    /// When true, the *new* side is read from the working-tree file at `path`
+    /// rather than from `new_id` (uncommitted-changes mode). The old side is
+    /// still the HEAD blob in `old_id`.
+    pub new_in_worktree: bool,
+    /// True for a file not yet tracked by git (only possible in the
+    /// uncommitted-changes view). Such a file is also `Added`, but displayed
+    /// distinctly and hidden when the untracked toggle is off.
+    pub untracked: bool,
 }
 
 impl FileChange {
     pub fn is_binary(&self) -> bool {
         matches!(self.special, Special::Binary { .. })
+    }
+
+    /// Single-letter status code for display, using `?` for untracked files
+    /// (as `git status` does) rather than the bare `A`.
+    pub fn display_letter(&self) -> char {
+        if self.untracked {
+            '?'
+        } else {
+            self.status.letter()
+        }
+    }
+
+    /// Right-column annotation word, "untracked" for untracked files.
+    pub fn display_annotation(&self) -> Option<&'static str> {
+        if self.untracked {
+            Some("untracked")
+        } else {
+            self.status.annotation()
+        }
     }
 }
 
@@ -100,6 +127,10 @@ pub struct Changeset {
     pub head_name: String,
     pub files: Vec<FileChange>,
     pub commits: Vec<CommitInfo>,
+    /// True for the uncommitted-changes view (working tree vs HEAD). The
+    /// "head" side is the working tree, not a commit, so there is no commit
+    /// range — `commits` is empty and the overview adjusts what it shows.
+    pub is_working: bool,
 }
 
 impl Changeset {
