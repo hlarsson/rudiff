@@ -184,14 +184,11 @@ impl DiffLine {
 #[derive(Clone, Debug)]
 pub struct Hunk {
     // Traditional `@@ -old_start,old_lines +new_start,new_lines @@` header data.
-    // We display "hunk N of M" + function context instead, so only `new_start`
-    // is read today; the rest is kept to model a hunk faithfully.
-    #[allow(dead_code)]
+    // The UI shows "hunk N of M" + function context, but the explain feature
+    // renders these into a real unified-diff header for the prompt.
     pub old_start: usize,
-    #[allow(dead_code)]
     pub old_lines: usize,
     pub new_start: usize,
-    #[allow(dead_code)]
     pub new_lines: usize,
     /// Enclosing function/type context from tree-sitter (populated lazily).
     pub function_context: Option<String>,

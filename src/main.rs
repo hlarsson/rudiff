@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod config;
+mod explain;
 mod git;
 mod group;
 mod syntax;
@@ -97,6 +98,14 @@ fn snapshot(
     app.width = w;
     if let Some(keys) = &cli.keys {
         app.feed_keys(keys);
+    }
+
+    // If a key script kicked off an async `claude` query, pump it to completion
+    // (bounded) so the snapshot can capture the result rather than the spinner.
+    let started = std::time::Instant::now();
+    while app.explain.is_running() && started.elapsed() < std::time::Duration::from_secs(90) {
+        app.explain.poll();
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let backend = TestBackend::new(w, h);

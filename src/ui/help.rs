@@ -16,6 +16,7 @@ const SECTIONS: &[Section] = &[
         &[
             ("q", "quit"),
             ("?", "toggle this help"),
+            ("e", "explain changes with Claude"),
             ("esc", "close overlay / cancel / back"),
         ],
     ),

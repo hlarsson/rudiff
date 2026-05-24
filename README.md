@@ -32,6 +32,10 @@ request is rendered; `A..B` is a literal two-dot diff.
   (across languages) that reference the symbols defined in the open file.
 - **Custom groups** — group changes into vertical domain slices via
   `.rudiff.toml`.
+- **Explain with Claude** — press `e` to ask the Claude Code CLI (`claude -p`)
+  to summarize the current file's diff (or the whole branch from the overview).
+  The query runs in the background — `esc` cancels it mid-flight — and the
+  response shows in a scrollable overlay. Requires `claude` on your PATH.
 
 ## Keybindings
 
@@ -39,7 +43,7 @@ Press `?` in the app for the full list. Highlights:
 
 | Context  | Keys |
 |----------|------|
-| Global   | `q` quit · `?` help · `esc` back/cancel |
+| Global   | `q` quit · `?` help · `e` explain with Claude · `esc` back/cancel |
 | Overview | `j`/`k` move · `⏎` open · `v` viewed · `space` multi-select · `/` filter · `s` sort · `c` commits |
 | Diff     | `]h`/`[h` hunk · `]f`/`[f` file · `]r`/`[r` related · `o` overview · `v` viewed+next · `s` unified/side-by-side · `w` whitespace · `z`/`Z`/`zR`/`zM` folds · `/` `n` `N` search |
 

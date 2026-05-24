@@ -335,6 +335,8 @@ pub struct App {
     pub show_help: bool,
     /// Read-only commits-list overlay (placeholder for the v2 commits screen).
     pub show_commits: bool,
+    /// "Explain these changes" query/overlay state.
+    pub explain: crate::explain::Explain,
     /// True while `/` search capture is active in the diff view.
     pub diff_searching: bool,
     /// Pending first key of a two-key sequence (`g`, `z`, `]`, `[`).
@@ -379,6 +381,7 @@ impl App {
             mode_override: None,
             show_help: false,
             show_commits: false,
+            explain: crate::explain::Explain::Idle,
             diff_searching: false,
             pending: None,
             flash: None,
@@ -406,8 +409,17 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         while !self.should_quit {
+            // Pick up output from an in-flight `claude` query before drawing.
+            self.explain.poll();
             terminal.draw(|f| ui::draw(self, f))?;
-            if event::poll(Duration::from_millis(150))? {
+            // Poll faster while a query runs so the spinner animates and the
+            // result appears promptly.
+            let timeout = if self.explain.is_running() {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_millis(150)
+            };
+            if event::poll(timeout)? {
                 match event::read()? {
                     Event::Key(key) => self.on_key(key),
                     Event::Resize(_, _) => {}
@@ -415,7 +427,8 @@ impl App {
                 }
             }
         }
-        // Persist viewed status on a clean exit.
+        // Kill any in-flight query and persist viewed status on a clean exit.
+        self.explain.cancel();
         self.viewed.save();
         Ok(())
     }
@@ -464,6 +477,10 @@ impl App {
             self.show_commits = false;
             return;
         }
+        if self.explain.is_active() {
+            self.on_explain_key(key);
+            return;
+        }
 
         // Filter input mode captures typing.
         if self.ov.filtering {
@@ -487,12 +504,97 @@ impl App {
             (KeyCode::Char('q'), _) => self.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
             (KeyCode::Char('?'), _) => self.show_help = true,
+            (KeyCode::Char('e'), _) => self.explain_current(),
             (KeyCode::Esc, _) if self.screen == Screen::Diff => self.back_to_overview(),
             _ => match self.screen {
                 Screen::Overview => self.on_overview_key(key),
                 Screen::Diff => self.on_diff_key(key),
             },
         }
+    }
+
+    /// Keys while the explain overlay is up. While the query runs, only `esc`
+    /// (cancel) is honored; once a result is shown, `j`/`k` scroll and any of
+    /// `esc`/`q`/`enter`/`e` dismiss it.
+    fn on_explain_key(&mut self, key: KeyEvent) {
+        if self.explain.is_running() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.explain.cancel();
+                self.flash = Some("explanation canceled".to_string());
+            }
+            return;
+        }
+        // Result shown.
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.explain.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => self.explain.scroll_by(-1),
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('e') => {
+                self.explain.dismiss();
+            }
+            _ => {}
+        }
+    }
+
+    /// Ask `claude -p` to explain the current file (in the diff view) or the
+    /// whole changeset (on the overview).
+    fn explain_current(&mut self) {
+        let (instruction, diff_text, target) = match self.screen {
+            Screen::Diff => {
+                let Some(d) = &self.diff else { return };
+                let fc = &self.changeset.files[d.file_index];
+                let text = crate::explain::render_unified(&fc.path, &d.doc);
+                let instruction = format!(
+                    "You are helping review a pull request. Concisely explain this change to \
+                     `{}` for a reviewer: what it does and why it likely matters. Use a few short \
+                     bullet points; don't restate the diff line by line.",
+                    fc.path.display()
+                );
+                (instruction, text, fc.path.display().to_string())
+            }
+            Screen::Overview => {
+                let text = self.changeset_diff_text();
+                let instruction = format!(
+                    "You are helping review a pull request ({} → {}). Concisely explain what this \
+                     branch changes overall and why, for a reviewer. Lead with a one-sentence \
+                     summary, then a few short bullets grouped by area.",
+                    self.changeset.head_name, self.changeset.base_name
+                );
+                let target = format!(
+                    "{} ({} files)",
+                    self.changeset.head_name,
+                    self.changeset.files.len()
+                );
+                (instruction, text, target)
+            }
+        };
+
+        if diff_text.trim().is_empty() {
+            self.flash = Some("nothing to explain here".to_string());
+            return;
+        }
+        self.explain = crate::explain::Explain::start(&instruction, &diff_text, target);
+    }
+
+    /// Concatenated unified diff of the whole changeset, capped to keep the
+    /// prompt small. Binary/submodule files are noted but not expanded.
+    fn changeset_diff_text(&self) -> String {
+        let mut out = String::new();
+        for fc in &self.changeset.files {
+            if out.len() >= crate::explain::MAX_DIFF_BYTES {
+                out.push_str("\n… (remaining files omitted)\n");
+                break;
+            }
+            if fc.is_binary() {
+                out.push_str(&format!("# {} (binary, not shown)\n", fc.path.display()));
+                continue;
+            }
+            let fd = self
+                .repo
+                .load_file_diff(fc, crate::git::diff::CONTEXT_RADIUS, false);
+            out.push_str(&crate::explain::render_unified(&fc.path, &fd));
+            out.push('\n');
+        }
+        out
     }
 
     /// Handle the second key of a sequence. Returns true if consumed.

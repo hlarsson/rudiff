@@ -4,6 +4,7 @@
 
 mod commits;
 mod diffview;
+mod explain;
 mod help;
 mod overview;
 pub mod widgets;
@@ -24,5 +25,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         help::draw(app, f);
     } else if app.show_commits {
         commits::draw(app, f);
+    } else if app.explain.is_active() {
+        explain::draw(app, f);
     }
 }
