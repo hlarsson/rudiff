@@ -6,6 +6,7 @@ mod commits;
 mod diffview;
 mod explain;
 mod help;
+mod markdown;
 mod overview;
 pub mod widgets;
 

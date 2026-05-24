@@ -6,7 +6,6 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::explain::{Explain, ExplainModel};
@@ -29,10 +28,10 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 .map(|m| format!("{} · ", m.alias()))
                 .unwrap_or_default();
             let title = format!(" {frame} Explaining {} · {model}{secs}s ", r.target);
-            let body = if r.partial.is_empty() {
-                "Waiting for Claude…".to_string()
+            let lines = if r.partial.is_empty() {
+                vec![Line::from(Span::styled("Waiting for Claude…", theme.dim()))]
             } else {
-                r.partial.clone()
+                crate::ui::markdown::render(&r.partial, &theme)
             };
             // Stream view auto-scrolls to the bottom so the newest text shows.
             text_panel(
@@ -41,7 +40,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 area,
                 &title,
                 theme.accent,
-                &body,
+                lines,
                 "esc to cancel",
                 None,
             );
@@ -56,8 +55,10 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             } else {
                 (" Explanation ".to_string(), theme.accent)
             };
-            // Clamp the stored scroll to the content, then render.
-            let max = max_scroll(area, text);
+            let lines = crate::ui::markdown::render(text, &theme);
+            // Clamp the stored scroll to the rendered content, then render.
+            let (_, body_h, inner_w) = result_layout(area);
+            let max = wrapped_count(&lines, inner_w).saturating_sub(body_h);
             if *scroll > max {
                 *scroll = max;
             }
@@ -67,7 +68,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
                 area,
                 &title,
                 color,
-                text,
+                lines,
                 "j/k scroll · esc/q close",
                 Some(*scroll),
             );
@@ -131,8 +132,9 @@ fn prompting(
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-/// Render a bordered, wrapped, scrollable text panel. `scroll = None` pins the
-/// view to the bottom (used while streaming); `Some(n)` scrolls to line `n`.
+/// Render a bordered, wrapped, scrollable text panel from pre-styled lines.
+/// `scroll = None` pins the view to the bottom (used while streaming);
+/// `Some(n)` scrolls to wrapped line `n`.
 #[allow(clippy::too_many_arguments)] // a self-contained renderer; a struct would just add noise
 fn text_panel(
     theme: &Theme,
@@ -140,15 +142,13 @@ fn text_panel(
     area: Rect,
     title: &str,
     title_color: ratatui::style::Color,
-    body: &str,
+    lines: Vec<Line<'static>>,
     footer: &str,
     scroll: Option<usize>,
 ) {
     let (popup, body_h, inner_w) = result_layout(area);
-    let scroll = scroll.unwrap_or_else(|| {
-        // Auto-scroll to bottom.
-        wrapped_line_count(body, inner_w).saturating_sub(body_h)
-    });
+    let max = wrapped_count(&lines, inner_w).saturating_sub(body_h);
+    let scroll = scroll.unwrap_or(max).min(max);
 
     let block = Block::default()
         .title(title.to_string())
@@ -161,16 +161,6 @@ fn text_panel(
         .border_style(theme.chrome_style());
     let inner = block.inner(popup);
     let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-
-    let lines: Vec<Line> = body
-        .lines()
-        .map(|l| {
-            Line::from(Span::styled(
-                l.to_string(),
-                Style::default().fg(theme.secondary),
-            ))
-        })
-        .collect();
 
     f.render_widget(Clear, popup);
     f.render_widget(block, popup);
@@ -196,15 +186,11 @@ fn result_layout(area: Rect) -> (Rect, usize, usize) {
     (popup, body_h, inner_w.max(1))
 }
 
-fn max_scroll(area: Rect, text: &str) -> usize {
-    let (_, body_h, inner_w) = result_layout(area);
-    wrapped_line_count(text, inner_w).saturating_sub(body_h)
-}
-
-/// Estimate how many terminal rows `text` occupies when wrapped to `width`.
-fn wrapped_line_count(text: &str, width: usize) -> usize {
+/// Estimate how many terminal rows the rendered `lines` occupy at `width`.
+fn wrapped_count(lines: &[Line], width: usize) -> usize {
     let width = width.max(1);
-    text.lines()
+    lines
+        .iter()
         .map(|l| {
             let w = l.width();
             if w == 0 { 1 } else { w.div_ceil(width) }
