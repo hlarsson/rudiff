@@ -1,6 +1,6 @@
 //! Core data model for a changeset between two git trees.
 //!
-//! Shapes follow the handoff sketch but are refined for lazy loading: the
+//! Shapes follow the original design sketch but are refined for lazy loading: the
 //! overview only needs per-file stats + a content hash, so [`FileChange`]
 //! carries the blob ids needed to compute hunks lazily when a file is opened.
 
@@ -120,7 +120,7 @@ impl Changeset {
     }
 
     /// Age of the branch: author time of the oldest commit unique to the
-    /// range (the handoff's "oldest commit not on base").
+    /// range (the "oldest commit not on base").
     pub fn oldest_commit_secs(&self) -> Option<i64> {
         self.commits.iter().map(|c| c.time_secs).min()
     }

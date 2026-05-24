@@ -1,6 +1,6 @@
 //! Color palette.
 //!
-//! The handoff asks for a palette that works in both light and dark terminals
+//! The design brief asks for a palette that works in both light and dark terminals
 //! and degrades from truecolor to 256-color. We adapt along two axes detected
 //! from the environment:
 //!

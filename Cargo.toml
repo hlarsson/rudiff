@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A fast, read-only terminal viewer for git diffs, built for PR-style review."
 
-# Performance is a feature (see HANDOFF.md): tune the release build for runtime
-# speed at the cost of compile time.
+# Performance is a feature: tune the release build for runtime speed at the
+# cost of compile time.
 [profile.release]
 lto = "thin"
 codegen-units = 1
