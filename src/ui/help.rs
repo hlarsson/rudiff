@@ -32,6 +32,7 @@ const SECTIONS: &[Section] = &[
             ("/", "filter file list"),
             ("s", "cycle sort (size/path/status)"),
             ("t", "show/hide untracked files (--uncommitted)"),
+            ("C", "commit reviewed files (--uncommitted)"),
             ("c", "commits view (placeholder)"),
         ],
     ),

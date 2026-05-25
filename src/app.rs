@@ -337,6 +337,8 @@ pub struct App {
     pub show_commits: bool,
     /// "Explain these changes" query/overlay state.
     pub explain: crate::explain::Explain,
+    /// "Commit reviewed files" message-prompt state (uncommitted view only).
+    pub commit: crate::commit::Commit,
     /// Model for the `e` command, from `.rudiff.toml` (`None` => claude default).
     explain_model: Option<crate::explain::ExplainModel>,
     /// The active group config, retained so the rollup can be rebuilt when the
@@ -394,6 +396,7 @@ impl App {
             show_help: false,
             show_commits: false,
             explain: crate::explain::Explain::Idle,
+            commit: crate::commit::Commit::Idle,
             explain_model,
             config,
             show_untracked,
@@ -496,6 +499,10 @@ impl App {
             self.on_explain_key(key);
             return;
         }
+        if self.commit.is_active() {
+            self.on_commit_key(key);
+            return;
+        }
 
         // Filter input mode captures typing.
         if self.ov.filtering {
@@ -573,6 +580,74 @@ impl App {
                 self.explain.dismiss();
             }
             _ => {}
+        }
+    }
+
+    /// Keys while the commit-message prompt is up: type the message, enter to
+    /// commit, esc to cancel.
+    fn on_commit_key(&mut self, key: KeyEvent) {
+        if !self.commit.is_prompting() {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.commit = crate::commit::Commit::Idle,
+            KeyCode::Enter => self.do_commit(),
+            KeyCode::Backspace => self.commit.input_backspace(),
+            KeyCode::Char(c) => self.commit.input_push(c),
+            _ => {}
+        }
+    }
+
+    /// Open the commit-message prompt for the reviewed files. Only meaningful in
+    /// the uncommitted view; needs at least one file marked viewed.
+    fn start_commit(&mut self) {
+        if !self.changeset.is_working {
+            self.flash = Some("commit applies only to --uncommitted".to_string());
+            return;
+        }
+        // Reviewed files, in the current display order, as working-tree paths.
+        let files: Vec<std::path::PathBuf> = self
+            .ov
+            .order
+            .iter()
+            .map(|&fi| &self.changeset.files[fi])
+            .filter(|fc| self.viewed.is_viewed(fc.content_hash))
+            .map(|fc| fc.path.clone())
+            .collect();
+        if files.is_empty() {
+            self.flash = Some("no reviewed files to commit (mark with v)".to_string());
+            return;
+        }
+        self.commit = crate::commit::Commit::prompt(files);
+    }
+
+    /// Stage and commit the reviewed files with the typed message. On success,
+    /// refresh the working changeset (the committed files drop out) and report
+    /// it; on failure, keep the prompt open with the error so the user can fix
+    /// it and retry.
+    fn do_commit(&mut self) {
+        let (files, message) = match &self.commit {
+            crate::commit::Commit::Prompting(p) => (p.files.clone(), p.input.trim().to_string()),
+            _ => return,
+        };
+        if message.is_empty() {
+            self.commit.set_notice("enter a commit message".to_string());
+            return;
+        }
+        match crate::commit::run_commit(self.repo.root(), &files, &message) {
+            Ok(summary) => {
+                self.commit = crate::commit::Commit::Idle;
+                let n = files.len();
+                if let Err(e) = self.rebuild_working() {
+                    self.flash = Some(format!("committed {summary}, but refresh failed: {e}"));
+                } else {
+                    self.flash = Some(format!(
+                        "committed {} — {summary}",
+                        crate::util::plural(n, "file")
+                    ));
+                }
+            }
+            Err(e) => self.commit.set_notice(e),
         }
     }
 
@@ -707,6 +782,7 @@ impl App {
             }
             (KeyCode::Char('v'), _) => self.toggle_viewed_selection(),
             (KeyCode::Char('t'), _) => self.toggle_untracked(),
+            (KeyCode::Char('C'), _) => self.start_commit(),
             (KeyCode::Char(' '), _) => self.toggle_mark(),
             (KeyCode::Char('c'), _) => self.show_commits = true,
             (KeyCode::Char('o'), _) => {
@@ -1288,15 +1364,8 @@ impl App {
             return;
         }
         self.show_untracked = !self.show_untracked;
-        match self.repo.build_working_changeset(self.show_untracked) {
-            Ok(cs) => {
-                self.changeset = cs;
-                self.grouping = group::build(&self.changeset.files, self.config.as_ref());
-                // File indices change meaning when the set changes; drop the
-                // transient multi-selection rather than mis-targeting it.
-                self.ov.marked.clear();
-                self.ov.offset = 0;
-                self.recompute_order();
+        match self.rebuild_working() {
+            Ok(()) => {
                 let n = self.changeset.files.len();
                 self.flash = Some(if self.show_untracked {
                     format!("showing untracked files ({n} total)")
@@ -1310,6 +1379,21 @@ impl App {
                 self.flash = Some(format!("could not refresh: {e}"));
             }
         }
+    }
+
+    /// Rebuild the working-tree changeset (respecting the untracked toggle) and
+    /// reset the derived view state. Used after toggling untracked files and
+    /// after committing. Errors are returned for the caller to surface.
+    fn rebuild_working(&mut self) -> anyhow::Result<()> {
+        let cs = self.repo.build_working_changeset(self.show_untracked)?;
+        self.changeset = cs;
+        self.grouping = group::build(&self.changeset.files, self.config.as_ref());
+        // File indices change meaning when the set changes; drop the transient
+        // multi-selection rather than mis-targeting it.
+        self.ov.marked.clear();
+        self.ov.offset = 0;
+        self.recompute_order();
+        Ok(())
     }
 
     fn recompute_order(&mut self) {

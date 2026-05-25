@@ -2,6 +2,7 @@
 //! Layout-time mutations (clamping scroll, recording viewport height) happen
 //! here because they depend on the rendered area.
 
+mod commit;
 mod commits;
 mod diffview;
 mod explain;
@@ -28,5 +29,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         commits::draw(app, f);
     } else if app.explain.is_active() {
         explain::draw(app, f);
+    } else if app.commit.is_active() {
+        commit::draw(app, f);
     }
 }

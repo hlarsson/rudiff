@@ -400,9 +400,10 @@ fn render_footer(app: &App, f: &mut Frame, area: Rect) {
         ("/", "search"),
         ("s", "sort"),
     ];
-    // The untracked toggle only does anything in the uncommitted view.
+    // The untracked toggle and commit action only apply in the uncommitted view.
     if app.changeset.is_working {
         hints.push(("t", "untracked"));
+        hints.push(("C", "commit"));
     }
     hints.extend([("c", "commits"), ("?", "help"), ("q", "quit")]);
     f.render_widget(
