@@ -1,9 +1,11 @@
 # rudiff
 
-A fast, read-only terminal viewer for git diffs — built for reviewing a feature
-branch the way you'd review a pull request, as an alternative to GitHub's web UI.
+A fast terminal viewer for git diffs — built for reviewing a feature branch the
+way you'd review a pull request, as an alternative to GitHub's web UI.
 
-It never modifies git state. It is a viewer, not a git client.
+It is a viewer first: it never rewrites history or touches your existing
+branches. The one exception is committing the files you've reviewed in the
+`--uncommitted` view (`C`), which is always an explicit, opt-in keypress.
 
 <p align="center">
   <img src="docs/overview.png" alt="rudiff overview screen: stats, reviewed progress bar, directory rollup, and file list" width="900">
@@ -30,7 +32,11 @@ request is rendered; `A..B` is a literal two-dot diff.
   against HEAD (like `git diff HEAD`): staged and unstaged edits to tracked
   files, plus untracked files (gitignored ones excluded). Press `t` to
   show/hide the untracked files. Useful for reviewing your own work before
-  committing. Mutually exclusive with a revspec argument.
+  committing — and once you've marked files viewed (`v`), press `C` to commit
+  exactly those files: a prompt collects a commit message, then rudiff stages
+  and commits only the reviewed paths (a scoped `git add` + `git commit`, so
+  anything else you'd staged is left alone). Mutually exclusive with a revspec
+  argument.
 - **Diff view** — unified or side-by-side, with syntax highlighting, enclosing
   function context in hunk headers, intra-line (changed-character) highlighting,
   and folded context you can expand.
@@ -64,7 +70,7 @@ Press `?` in the app for the full list. Highlights:
 | Context  | Keys |
 |----------|------|
 | Global   | `q` quit · `?` help · `e` explain with Claude · `esc` back/cancel |
-| Overview | `j`/`k` move · `⏎` open · `v` viewed · `space` multi-select · `/` filter · `s` sort · `t` untracked (`--uncommitted`) · `c` commits |
+| Overview | `j`/`k` move · `⏎` open · `v` viewed · `space` multi-select · `/` filter · `s` sort · `t` untracked (`--uncommitted`) · `C` commit reviewed (`--uncommitted`) · `c` commits |
 | Diff     | `]h`/`[h` hunk · `]f`/`[f` file · `]r`/`[r` related · `o` overview · `v` viewed+next · `s` unified/side-by-side · `w` whitespace · `z`/`Z`/`zR`/`zM` folds · `/` `n` `N` search |
 
 ## Configuration: `.rudiff.toml`

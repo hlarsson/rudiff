@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod commit;
 mod config;
 mod explain;
 mod git;
