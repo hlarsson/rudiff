@@ -31,12 +31,15 @@ request is rendered; `A..B` is a literal two-dot diff.
 - **Uncommitted-changes view** — `-u`/`--uncommitted` reviews your working tree
   against HEAD (like `git diff HEAD`): staged and unstaged edits to tracked
   files, plus untracked files (gitignored ones excluded). Press `t` to
-  show/hide the untracked files. Useful for reviewing your own work before
-  committing — and once you've marked files viewed (`v`), press `C` to commit
-  exactly those files: a prompt collects a commit message, then rudiff stages
-  and commits only the reviewed paths (a scoped `git add` + `git commit`, so
-  anything else you'd staged is left alone). Mutually exclusive with a revspec
-  argument.
+  show/hide the untracked files. The view tracks the filesystem **live** — edits,
+  new files, and deletions show up without a restart, and editing a file you'd
+  marked viewed clears that mark automatically (viewed status keys off the
+  diff's content, so a meaningful change re-surfaces it). Useful for reviewing
+  your own work before committing — and once you've marked files viewed (`v`),
+  press `C` to commit exactly those files: a prompt collects a commit message,
+  then rudiff stages and commits only the reviewed paths (a scoped `git add` +
+  `git commit`, so anything else you'd staged is left alone). Mutually exclusive
+  with a revspec argument.
 - **Diff view** — unified or side-by-side, with syntax highlighting, enclosing
   function context in hunk headers, intra-line (changed-character) highlighting,
   and folded context you can expand.
