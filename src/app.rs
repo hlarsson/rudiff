@@ -1,7 +1,7 @@
 //! Application state and the main event loop.
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -57,6 +57,11 @@ impl Whitespace {
 
 /// Width (in columns) at or above which side-by-side is the default layout.
 pub const SIDE_BY_SIDE_MIN_WIDTH: u16 = 165;
+
+/// Minimum gap between live rebuilds of the working-tree changeset. Short enough
+/// to feel immediate after a save, long enough that the status walk + hashing
+/// stays negligible. Only consulted in the `--uncommitted` view.
+const WORKING_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// One rendered row of the diff body. Indices reference `DiffState::doc`.
 #[derive(Clone)]
@@ -356,6 +361,9 @@ pub struct App {
     pub flash: Option<String>,
     /// Terminal width from the most recent render; drives layout auto-switch.
     pub width: u16,
+    /// When the working-tree changeset was last rebuilt from disk. Throttles the
+    /// live refresh in the `--uncommitted` view; unused otherwise.
+    last_working_refresh: Instant,
     should_quit: bool,
 }
 
@@ -404,6 +412,7 @@ impl App {
             pending: None,
             flash: None,
             width: 0,
+            last_working_refresh: Instant::now(),
             should_quit: false,
         };
         app.recompute_order();
@@ -429,6 +438,8 @@ impl App {
         while !self.should_quit {
             // Pick up output from an in-flight `claude` query before drawing.
             self.explain.poll();
+            // In the uncommitted view, reflect on-disk edits without a restart.
+            self.refresh_working_if_idle();
             terminal.draw(|f| ui::draw(self, f))?;
             // Poll faster while a query runs so the spinner animates and the
             // result appears promptly.
@@ -1396,6 +1407,118 @@ impl App {
         Ok(())
     }
 
+    /// In the uncommitted view, rebuild the changeset from the working tree on a
+    /// throttle so on-disk edits appear without a restart. Skipped while the
+    /// user is mid-input or an overlay is up, so it never disrupts typing or a
+    /// captured action; those states pick up the change on the next idle tick.
+    fn refresh_working_if_idle(&mut self) {
+        if !self.changeset.is_working {
+            return;
+        }
+        if self.ov.filtering
+            || self.diff_searching
+            || self.explain.is_active()
+            || self.commit.is_active()
+        {
+            return;
+        }
+        if self.last_working_refresh.elapsed() < WORKING_REFRESH_INTERVAL {
+            return;
+        }
+        self.last_working_refresh = Instant::now();
+        self.reload_working_changeset();
+    }
+
+    /// Rebuild the working changeset and, if it actually changed, swap it in
+    /// while preserving the user's place: the cursor and multi-select are
+    /// remapped by path (file indices shuffle as files appear or vanish), and an
+    /// open diff is reloaded in place — or closed if its file no longer differs
+    /// from HEAD. A meaningfully-edited file silently loses its viewed mark,
+    /// because viewed status is keyed by diff-content hash (see [`Viewed`]); the
+    /// rebuilt file simply carries a hash that isn't in the viewed set.
+    fn reload_working_changeset(&mut self) {
+        let Ok(cs) = self.repo.build_working_changeset(self.show_untracked) else {
+            return;
+        };
+        if !working_changed(&self.changeset, &cs) {
+            return;
+        }
+
+        // Capture identity (paths) and the open diff's prior state before the
+        // swap invalidates every file index.
+        let selected_path = self
+            .selected_file_index()
+            .map(|fi| self.changeset.files[fi].path.clone());
+        let marked_paths: HashSet<std::path::PathBuf> = self
+            .ov
+            .marked
+            .iter()
+            .map(|&fi| self.changeset.files[fi].path.clone())
+            .collect();
+        // In the diff view the cursor tracks the open file, so `selected_path`
+        // also identifies it; capture the rest of what a reload needs.
+        let diff_state = match (self.screen, &self.diff) {
+            (Screen::Diff, Some(d)) => Some((
+                self.changeset.files[d.file_index].content_hash,
+                d.mode,
+                d.scroll,
+            )),
+            _ => None,
+        };
+
+        self.changeset = cs;
+        self.grouping = group::build(&self.changeset.files, self.config.as_ref());
+        // The related-files index is keyed by the old file set; recompute lazily.
+        self.facts = None;
+        // Remap the multi-selection onto the files that still exist, by path.
+        self.ov.marked = self
+            .changeset
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, fc)| marked_paths.contains(&fc.path))
+            .map(|(i, _)| i)
+            .collect();
+        self.recompute_order();
+        // Restore the cursor to the same path where possible; `recompute_order`
+        // has already clamped it into range as a fallback.
+        if let Some(p) = &selected_path
+            && let Some(pos) = self
+                .ov
+                .order
+                .iter()
+                .position(|&fi| &self.changeset.files[fi].path == p)
+        {
+            self.ov.selected = pos;
+        }
+
+        // Reconcile the open diff, if any.
+        if let Some((old_hash, mode, scroll)) = diff_state {
+            let still_present = selected_path
+                .as_ref()
+                .is_some_and(|p| self.changeset.files.iter().any(|fc| &fc.path == p));
+            if !still_present {
+                // The file no longer differs from HEAD (reverted, deleted, or
+                // committed elsewhere): its diff is meaningless now.
+                self.diff = None;
+                self.screen = Screen::Overview;
+            } else if let Some(fi) = self.selected_file_index() {
+                // The cursor was restored onto the open file above. Reload only
+                // when its content changed, keeping the scroll (clamped) so the
+                // view doesn't jump; otherwise just realign the stored index.
+                if self.changeset.files[fi].content_hash != old_hash {
+                    self.related_cursor = 0;
+                    self.load_current_file(mode);
+                    if let Some(d) = &mut self.diff {
+                        d.scroll = scroll.min(d.total_rows.saturating_sub(1));
+                    }
+                } else if let Some(d) = &mut self.diff {
+                    d.file_index = fi;
+                }
+            }
+        }
+    }
+
     fn recompute_order(&mut self) {
         let filter = self.ov.filter.to_lowercase();
         let files = &self.changeset.files;
@@ -1615,5 +1738,233 @@ fn status_rank(s: crate::git::model::FileStatus) -> u8 {
         Renamed => 2,
         Copied => 3,
         Deleted => 4,
+    }
+}
+
+/// Whether two working-tree changesets differ in any way the UI should reflect.
+/// Both file lists are sorted by path, so a positional comparison suffices.
+/// `content_hash` is whitespace-normalized, so the line counts are included too:
+/// a whitespace-only edit refreshes the displayed diff (counts move) while
+/// keeping the file viewed (hash unchanged).
+fn working_changed(old: &Changeset, new: &Changeset) -> bool {
+    if old.files.len() != new.files.len() {
+        return true;
+    }
+    old.files.iter().zip(&new.files).any(|(a, b)| {
+        a.path != b.path
+            || a.content_hash != b.content_hash
+            || a.status != b.status
+            || a.additions != b.additions
+            || a.deletions != b.deletions
+            || a.untracked != b.untracked
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Cli;
+    use crate::git::Repo;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn uncommitted_cli() -> Cli {
+        Cli {
+            revspec: None,
+            uncommitted: true,
+            unified: false,
+            side_by_side: false,
+            no_config: true,
+            config: None,
+            print: false,
+            snapshot: None,
+            keys: None,
+        }
+    }
+
+    /// Build an `App` in the uncommitted view over a fresh temp repo with one
+    /// committed file, returning the app and the repo root.
+    fn app_over_temp_repo(name: &str) -> (App, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("rudiff-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.email", "t@example.com"]);
+        git(&dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("tracked.txt"), "line1\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-qm", "init"]);
+        // A working change so the view is non-empty.
+        std::fs::write(dir.join("tracked.txt"), "line1\nline2\n").unwrap();
+
+        let repo = Repo::discover(&dir).unwrap();
+        let cs = repo.build_working_changeset(true).unwrap();
+        let app = App::new(repo, cs, &uncommitted_cli(), None);
+        (app, dir)
+    }
+
+    fn index_of(app: &App, path: &str) -> Option<usize> {
+        app.changeset
+            .files
+            .iter()
+            .position(|f| f.path == Path::new(path))
+    }
+
+    #[test]
+    fn refresh_unviews_an_edited_file() {
+        let (mut app, dir) = app_over_temp_repo("refresh-unview");
+
+        let fi = index_of(&app, "tracked.txt").unwrap();
+        let hash = app.changeset.files[fi].content_hash;
+        app.viewed.set_viewed(hash, true);
+        assert!(app.is_viewed(fi), "file should start viewed");
+
+        // A meaningful on-disk edit changes the diff content.
+        std::fs::write(dir.join("tracked.txt"), "line1\nline2\nline3\n").unwrap();
+        app.reload_working_changeset();
+
+        let fi = index_of(&app, "tracked.txt").expect("file still present");
+        assert!(
+            !app.is_viewed(fi),
+            "an edited file should drop its viewed mark"
+        );
+        assert_eq!(app.changeset.files[fi].additions, 2, "stats should update");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_keeps_a_viewed_file_when_unchanged() {
+        let (mut app, dir) = app_over_temp_repo("refresh-stable");
+
+        let fi = index_of(&app, "tracked.txt").unwrap();
+        app.viewed
+            .set_viewed(app.changeset.files[fi].content_hash, true);
+
+        // Touch an *unrelated* new file; the reviewed file is untouched.
+        std::fs::write(dir.join("other.txt"), "brand new\n").unwrap();
+        app.reload_working_changeset();
+
+        let fi = index_of(&app, "tracked.txt").unwrap();
+        assert!(
+            app.is_viewed(fi),
+            "an untouched file should stay viewed across a refresh"
+        );
+        assert!(
+            index_of(&app, "other.txt").is_some(),
+            "new file should appear"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_preserves_the_cursor_by_path_across_reorder() {
+        let (mut app, dir) = app_over_temp_repo("refresh-cursor");
+        // Only `tracked.txt` is changed, so the cursor sits on it.
+        assert_eq!(
+            app.changeset.files[app.selected_file_index().unwrap()].path,
+            Path::new("tracked.txt")
+        );
+
+        // Add a file that sorts ahead of `tracked.txt`, shifting indices.
+        std::fs::write(dir.join("aaa.txt"), "first\n").unwrap();
+        app.reload_working_changeset();
+
+        assert!(index_of(&app, "aaa.txt").is_some());
+        assert_eq!(
+            app.changeset.files[app.selected_file_index().unwrap()].path,
+            Path::new("tracked.txt"),
+            "cursor should follow the file by path, not by index"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_reloads_the_open_diff_in_place() {
+        let (mut app, dir) = app_over_temp_repo("refresh-diff-reload");
+        app.open_diff(); // cursor is on the only changed file
+        assert!(matches!(app.screen, Screen::Diff));
+
+        std::fs::write(dir.join("tracked.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+        app.reload_working_changeset();
+
+        assert!(matches!(app.screen, Screen::Diff), "stays in the diff view");
+        let doc = &app.diff.as_ref().unwrap().doc;
+        assert!(
+            doc.lines.iter().any(|l| l.content() == "line4"),
+            "reloaded diff should show the freshly-added line"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_closes_the_diff_when_its_file_reverts() {
+        let (mut app, dir) = app_over_temp_repo("refresh-diff-revert");
+        app.open_diff();
+        assert!(matches!(app.screen, Screen::Diff));
+
+        // Revert to the committed content: the file no longer differs from HEAD.
+        std::fs::write(dir.join("tracked.txt"), "line1\n").unwrap();
+        app.reload_working_changeset();
+
+        assert!(
+            matches!(app.screen, Screen::Overview),
+            "the diff closes once its file stops differing"
+        );
+        assert!(app.diff.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_if_idle_respects_throttle_and_input_guards() {
+        let (mut app, dir) = app_over_temp_repo("refresh-gating");
+        let fi = index_of(&app, "tracked.txt").unwrap();
+        app.viewed
+            .set_viewed(app.changeset.files[fi].content_hash, true);
+        std::fs::write(dir.join("tracked.txt"), "line1\nedited\n").unwrap();
+        let still_viewed = |app: &App| app.is_viewed(index_of(app, "tracked.txt").unwrap());
+
+        // Just refreshed: the throttle defers the rebuild.
+        app.last_working_refresh = Instant::now();
+        app.refresh_working_if_idle();
+        assert!(still_viewed(&app), "throttle should defer the refresh");
+
+        // Throttle elapsed, but the user is typing a filter: still deferred.
+        let stale = Instant::now() - WORKING_REFRESH_INTERVAL - Duration::from_millis(50);
+        app.last_working_refresh = stale;
+        app.ov.filtering = true;
+        app.refresh_working_if_idle();
+        assert!(
+            still_viewed(&app),
+            "an active input guard should defer the refresh"
+        );
+
+        // Idle and past the throttle: now it rebuilds and un-views the edit.
+        app.ov.filtering = false;
+        app.last_working_refresh = stale;
+        app.refresh_working_if_idle();
+        assert!(
+            !still_viewed(&app),
+            "an idle tick should reflect the on-disk edit"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
