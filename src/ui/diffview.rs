@@ -156,14 +156,16 @@ fn render_body(app: &mut App, f: &mut Frame, area: Rect) {
         return;
     }
 
-    // Clamp scroll so we never scroll into empty space below the diff.
     let rows = area.height as usize;
-    let max_scroll = d.total_rows.saturating_sub(rows);
+    let gutter = gutter_width(d);
+    // Clamp scroll so we never scroll into empty space below the diff. A
+    // side-by-side row can wrap to multiple terminal lines, so we sum visual
+    // heights from the end rather than relying on the logical row count.
+    let max_scroll = max_scroll_visual(d, w, gutter, rows);
     if d.scroll > max_scroll {
         d.scroll = max_scroll;
     }
 
-    let gutter = gutter_width(d);
     let total_hunks = d.doc.hunks.len();
 
     // A logical row can produce more than one terminal line (wrapped
@@ -206,6 +208,75 @@ fn gutter_width(d: &DiffState) -> usize {
         .map(|l| l.new_lineno().or(l.old_lineno()).unwrap_or(0))
         .unwrap_or(0);
     max.to_string().len().clamp(3, 6)
+}
+
+/// The smallest scroll position from which the remaining rows still fit in
+/// `viewport` terminal lines. Walks rows from the end, summing visual heights
+/// (a side-by-side row can wrap to more than one terminal line). Returns 0 if
+/// the whole diff already fits.
+fn max_scroll_visual(d: &DiffState, w: u16, gutter: usize, viewport: usize) -> usize {
+    let n = d.rows.len();
+    if n == 0 || viewport == 0 {
+        return 0;
+    }
+    let mut sum = 0usize;
+    for i in (0..n).rev() {
+        let h = row_visual_height(d, i, w, gutter);
+        if sum + h > viewport {
+            // Adding row `i` would push the bottom off-screen. The smallest
+            // scroll that still shows everything from there down is `i + 1`,
+            // capped at the last row so we can always reach it.
+            return (i + 1).min(n - 1);
+        }
+        sum += h;
+    }
+    0
+}
+
+/// Terminal-line count for one logical display row at the current width.
+fn row_visual_height(d: &DiffState, row_idx: usize, w: u16, gutter: usize) -> usize {
+    match &d.rows[row_idx] {
+        DisplayRow::HunkSep { .. } | DisplayRow::Fold { .. } | DisplayRow::Line { .. } => 1,
+        DisplayRow::SideLine { left, right } => {
+            let sep_cols = 3u16; // " │ "
+            let total = w.saturating_sub(sep_cols);
+            let left_w = (total / 2) as usize;
+            let right_w = (total - total / 2) as usize;
+            let lh = half_visual_height(d, *left, left_w, gutter);
+            let rh = half_visual_height(d, *right, right_w, gutter);
+            lh.max(rh).max(1)
+        }
+    }
+}
+
+/// How many wrapped terminal lines one half-column of a side-by-side row
+/// occupies. Mirrors the wrapping that `build_half`/`visual_lines` perform.
+fn half_visual_height(d: &DiffState, idx: Option<usize>, width: usize, gutter: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let Some(idx) = idx else { return 0 };
+    let prefix = gutter + 4; // " " + gutter + " " + marker + " "
+    let content_w = width.saturating_sub(prefix).max(1);
+    let content = d.doc.lines[idx].content();
+    let mut lines = 1usize;
+    let mut col = 0usize;
+    let push = |cw: usize, lines: &mut usize, col: &mut usize| {
+        if *col + cw > content_w && *col > 0 {
+            *lines += 1;
+            *col = 0;
+        }
+        *col += cw;
+    };
+    for ch in content.chars() {
+        if ch == '\t' {
+            let n = TABSTOP - (col % TABSTOP);
+            for _ in 0..n {
+                push(1, &mut lines, &mut col);
+            }
+        } else {
+            push(ch.width().unwrap_or(0), &mut lines, &mut col);
+        }
+    }
+    lines
 }
 
 fn hunk_separator(
